@@ -1,31 +1,21 @@
-# main.py — core genérico (sin conocimiento de marca en el core)
+# main.py — core genérico (integrado con config/settings.py)
 
 # 💥💥 CORRECCIÓN FINAL 💥💥
 # Usar monkey_patch de eventlet en lugar de gevent
 import eventlet
 eventlet.monkey_patch()
 
-# Resto de importaciones
+# -----------------------
+# Importaciones estándar
+# -----------------------
 from flask import Flask, request, session, redirect, url_for, send_file, jsonify, render_template, make_response, Response
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import VoiceResponse, Gather, Connect
 from openai import OpenAI
-from dotenv import load_dotenv
-import os
-import json
-import time
+import os, json, time, re, glob, random, hashlib, html, uuid, requests, csv
+from io import StringIO
 from threading import Thread
 from datetime import datetime, timedelta
-import csv
-from io import StringIO
-import re
-import glob
-import random
-import hashlib
-import html
-import uuid
-import requests
-
 
 # 🔹 Twilio REST (para enviar mensajes manuales desde el panel)
 from twilio.rest import Client as TwilioClient
@@ -36,50 +26,18 @@ from firebase_admin import credentials, db
 # 🔹 NEW: FCM (para notificaciones push)
 from firebase_admin import messaging as fcm
 
-# Se eliminan las dependencias de WebSocket porque no funcionaban
-# import base64
-# import struct
-# import ssl
-# from threading import Event
-# import urllib.parse
-# try:
-#     from flask_sock import Sock
-#     import websocket
-# except Exception as _e:
-#     pass
+# -----------------------
+# Configuración centralizada
+# -----------------------
+# Usamos TODO desde config/settings.py para no duplicar nada en main.py
+from config import settings as cfg
 
-# =======================
-#  Cargar variables de entorno (Render -> Secret File)
-# =======================
-load_dotenv("/etc/secrets/.env")
-load_dotenv()
+# Cliente OpenAI basado en la API key central
+client = OpenAI(api_key=cfg.OPENAI_API_KEY)
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") or ""
-
-# Twilio REST creds (necesarias para enviar mensajes OUTBOUND)
-TWILIO_ACCOUNT_SID = (os.environ.get("TWILIO_ACCOUNT_SID") or "").strip()
-TWILIO_AUTH_TOKEN  = (os.environ.get("TWILIO_AUTH_TOKEN") or "").strip()
-
-# Fallbacks globales (se usan SOLO si el bot no trae link en su JSON ni hay variable de entorno)
-BOOKING_URL_FALLBACK = (os.environ.get("BOOKING_URL", "").strip())
-APP_DOWNLOAD_URL_FALLBACK = (os.environ.get("APP_DOWNLOAD_URL", "").strip())
-
-# 🔐 NEW (opcional): Bearer para proteger endpoints /push/* y (ahora) API móvil
-API_BEARER_TOKEN = (os.environ.get("API_BEARER_TOKEN") or "").strip()
-
-def _valid_url(u: str) -> bool:
-    return isinstance(u, str) and (u.startswith("http://") or u.startswith("https://"))
-
-if BOOKING_URL_FALLBACK and not _valid_url(BOOKING_URL_FALLBACK):
-    print(f"⚠️ BOOKING_URL_FALLBACK inválido: '{BOOKING_URL_FALLBACK}'")
-if APP_DOWNLOAD_URL_FALLBACK and not _valid_url(APP_DOWNLOAD_URL_FALLBACK):
-    print(f"⚠️ APP_DOWNLOAD_URL_FALLBACK inválido: '{APP_DOWNLOAD_URL_FALLBACK}'")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Flask app
 app = Flask(__name__)
 app.secret_key = "supersecreto_sundin_panel_2025"
-
-# ✅ Sesión persistente (remember me)
 app.permanent_session_lifetime = timedelta(days=60)
 app.config.update({
     "SESSION_COOKIE_SAMESITE": "Lax",
@@ -95,161 +53,17 @@ def add_cors_headers(resp):
     return resp
 
 def _bearer_ok(req) -> bool:
-    """Devuelve True si no hay token configurado o si el header Authorization coincide."""
-    if not API_BEARER_TOKEN:
+    """Devuelve True si no hay token configurado o si el header Authorization coincide (config central)."""
+    if not cfg.API_BEARER_TOKEN:
         return True
     auth = (req.headers.get("Authorization") or "").strip()
-    return auth == f"Bearer {API_BEARER_TOKEN}"
+    return auth == f"Bearer {cfg.API_BEARER_TOKEN}"
 
-# =======================
-#  Inicializar Firebase
-# =======================
-firebase_key_path = "/etc/secrets/firebase.json"
-firebase_db_url = (os.getenv("FIREBASE_DB_URL") or "").strip()
-
-if not firebase_db_url:
-    try:
-        with open("/etc/secrets/FIREBASE_DB_URL", "r", encoding="utf-8") as f:
-            firebase_db_url = f.read().strip().strip('"').strip("'")
-            if firebase_db_url:
-                print("[BOOT] FIREBASE_DB_URL leído desde Secret File.")
-    except Exception:
-        pass
-
-if not firebase_db_url:
-    print("❌ FIREBASE_DB_URL no configurado. Define la variable de entorno o crea el Secret File /etc/secrets/FIREBASE_DB_URL con la URL completa de tu RTDB.")
-
-if not firebase_admin._apps:
-    cred = credentials.Certificate(firebase_key_path)
-    if firebase_db_url:
-        firebase_admin.initialize_app(cred, {'databaseURL': firebase_db_url})
-        print(f"[BOOT] Firebase inicializado con RTDB: {firebase_db_url}")
-    else:
-        firebase_admin.initialize_app(cred)
-        print("⚠️ Firebase inicializado sin databaseURL (db.reference fallará hasta configurar FIREBASE_DB_URL).")
-
-# =======================
-#  Twilio REST Client (para respuestas manuales)
-# =======================
-twilio_client = None
-if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
-    try:
-        twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        print("[BOOT] Twilio REST client inicializado.")
-    except Exception as e:
-        print(f"⚠️ No se pudo inicializar Twilio REST client: {e}")
-else:
-    print("⚠️ TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN no configurados. El envío manual desde panel no funcionará hasta configurarlos.")
-
-# =======================
-#  Cargar bots desde carpeta bots/
-# =======================
-def load_bots_folder():
-    bots = {}
-    for path in glob.glob(os.path.join("bots", "*.json")):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                for k, v in data.items():
-                    bots[k] = v
-        except Exception as e:
-            print(f"⚠️ No se pudo cargar {path}: {e}")
-    return bots
-
-bots_config = load_bots_folder()
-if not bots_config:
-    print("⚠️ No se encontraron bots en ./bots/*.json")
-
-# =======================
-#  💡 Registrar la API de facturación (Blueprint)
-# =======================
-from billing_api import billing_bp, record_openai_usage
-app.register_blueprint(billing_bp, url_prefix="/billing")
-
-# 💡 API móvil (JSON público para la app)
-from bots.api_mobile import mobile_bp
-app.register_blueprint(mobile_bp, url_prefix="/api/mobile")
-
-
-# =======================
-#  Memorias por sesión (runtime)
-# =======================
-session_history = {}         # clave_sesion -> mensajes para OpenAI (texto)
-last_message_time = {}       # clave_sesion -> timestamp último mensaje
-follow_up_flags = {}         # clave_sesion -> {"5min": bool, "60min": bool}
-agenda_state = {}            # clave_sesion -> {"awaiting_confirm": bool, "status": str, "last_update": ts, "last_link_time": ts, "last_bot_hash": "", "closed": bool}
-greeted_state = {}           # clave_sesion -> bool (si ya se saludó)
-
-# ✅ CORRECCIÓN: Definición de variables globales para la voz
-voice_call_cache = {}
-voice_conversation_history = {}
-
-
-# =======================
-#  Helpers generales (neutros)
-# =======================
-def _hora_to_epoch_ms(hora_str: str) -> int:
-    try:
-        dt = datetime.strptime(hora_str, "%Y-%m-%d %H:%M:%S")
-        return int(dt.timestamp() * 1000)
-    except Exception:
-        return 0
-
-def _normalize_bot_name(name: str):
-    for cfg in bots_config.values():
-        if isinstance(cfg, dict):
-            if cfg.get("name", "").lower() == str(name).lower():
-                return cfg.get("name")
-    return None
-
-def _get_bot_cfg_by_name(name: str):
-    if not name:
-        return None
-    for cfg in bots_config.values():
-        if isinstance(cfg, dict) and cfg.get("name", "").lower() == name.lower():
-            return cfg
-    return None
-
-def _get_bot_cfg_by_number(to_number: str):
-    return bots_config.get(to_number)
-
-# ✅ VOICE helper: canonizar número a E.164 (+1...)
-def _canonize_phone(raw: str) -> str:
-    s = str(raw or "").strip()
-    for p in ("whatsapp:", "tel:", "sip:", "client:"):
-        if s.startswith(p):
-            s = s[len(p):]
-    digits = "".join(ch for ch in s if ch.isdigit())
-    if not digits:
-        return ""
-    if len(digits) == 11 and digits.startswith("1"):
-        return "+" + digits
-    if len(digits) == 10:
-        digits = "1" + digits
-    return "+" + digits
-
-# ✅ VOICE helper: encuentra bot por número (E.164 o whatsapp:+)
-def _get_bot_cfg_by_any_number(to_number: str):
-    if not to_number:
-        if len(bots_config) == 1:
-            return list(bots_config.values())[0]
-    
-    # ✅ CORRECCIÓN FINAL: Buscar por E.164 para mayor compatibilidad
-    canon_to = _canonize_phone(to_number)
-    for key, cfg in bots_config.items():
-        if _canonize_phone(key) == canon_to:
-            return cfg
-    
-    return bots_config.get(to_number)
-
-
-def _get_bot_number_by_name(bot_name: str) -> str:
-    """Devuelve la clave 'whatsapp:+1...' de bots_config para un nombre de bot dado."""
-    for number_key, cfg in bots_config.items():
-        if isinstance(cfg, dict) and cfg.get("name", "").strip().lower() == (bot_name or "").strip().lower():
-            return number_key
-    return ""
+# -----------------------
+# Utilidades simples locales (no duplicadas con cfg)
+# -----------------------
+def _valid_url(u: str) -> bool:
+    return isinstance(u, str) and (u.startswith("http://") or u.startswith("https://"))
 
 def _split_sentences(text: str):
     parts = re.split(r'(?<=[\.\!\?])\s+', (text or "").strip())
@@ -290,9 +104,90 @@ def _ensure_question(bot_cfg: dict, text: str, force_question: bool) -> str:
 def _make_system_message(bot_cfg: dict) -> str:
     return (bot_cfg or {}).get("system_prompt", "") or ""
 
-# =======================
-#  Helpers de links por BOT
-# =======================
+def _canonize_phone(raw: str) -> str:
+    return cfg.canonize_phone(raw)
+
+# -----------------------
+# Cargar bots (desde config central)
+# -----------------------
+bots_config = cfg.BOTS_CONFIG
+if not bots_config:
+    print("⚠️ No se encontraron bots en ./bots/*.json")
+
+# -----------------------
+# Inicializar Firebase
+# -----------------------
+firebase_key_path = cfg.FIREBASE_CRED_PATH
+firebase_db_url = (os.getenv("FIREBASE_DB_URL") or "").strip()
+
+if not firebase_db_url:
+    try:
+        with open("/etc/secrets/FIREBASE_DB_URL", "r", encoding="utf-8") as f:
+            firebase_db_url = f.read().strip().strip('"').strip("'")
+            if firebase_db_url:
+                print("[BOOT] FIREBASE_DB_URL leído desde Secret File.")
+    except Exception:
+        pass
+
+if not firebase_db_url:
+    print("❌ FIREBASE_DB_URL no configurado. Define la variable de entorno o crea el Secret File /etc/secrets/FIREBASE_DB_URL con la URL completa de tu RTDB.")
+
+if not firebase_admin._apps:
+    cred = credentials.Certificate(firebase_key_path)
+    if firebase_db_url:
+        firebase_admin.initialize_app(cred, {'databaseURL': firebase_db_url})
+        print(f"[BOOT] Firebase inicializado con RTDB: {firebase_db_url}")
+    else:
+        firebase_admin.initialize_app(cred)
+        print("⚠️ Firebase inicializado sin databaseURL (db.reference fallará hasta configurar FIREBASE_DB_URL).")
+
+# -----------------------
+# Twilio REST Client
+# -----------------------
+twilio_client = None
+if cfg.TWILIO_ACCOUNT_SID and cfg.TWILIO_AUTH_TOKEN:
+    try:
+        twilio_client = TwilioClient(cfg.TWILIO_ACCOUNT_SID, cfg.TWILIO_AUTH_TOKEN)
+        print("[BOOT] Twilio REST client inicializado.")
+    except Exception as e:
+        print(f"⚠️ No se pudo inicializar Twilio REST client: {e}")
+else:
+    print("⚠️ TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN no configurados. El envío manual desde panel no funcionará hasta configurarlos.")
+
+# -----------------------
+# Blueprints externos
+# -----------------------
+from billing_api import billing_bp, record_openai_usage
+app.register_blueprint(billing_bp, url_prefix="/billing")
+
+from bots.api_mobile import mobile_bp
+app.register_blueprint(mobile_bp, url_prefix="/api/mobile")
+
+# -----------------------
+# Memorias por sesión (runtime)
+# -----------------------
+session_history = {}         # clave_sesion -> mensajes para OpenAI (texto)
+last_message_time = {}       # clave_sesion -> timestamp último mensaje
+follow_up_flags = {}         # clave_sesion -> {"5min": bool, "60min": bool}
+agenda_state = {}            # clave_sesion -> {"awaiting_confirm": bool, "status": str, "last_update": ts, "last_link_time": ts, "last_bot_hash": "", "closed": bool}
+greeted_state = {}           # clave_sesion -> bool (si ya se saludó)
+
+# ✅ VOICE globals
+voice_call_cache = {}
+voice_conversation_history = {}
+
+# -----------------------
+# Helpers que ahora usan cfg (config central)
+# -----------------------
+def _normalize_bot_name(name: str):
+    return cfg.normalize_bot_name(name)
+
+def _get_bot_cfg_by_name(name: str):
+    return cfg.get_bot_cfg_by_name(name)
+
+def _get_bot_cfg_by_number(to_number: str):
+    return cfg.find_bot_by_number(to_number)
+
 def _drill_get(d: dict, path: str):
     cur = d
     for k in path.split("."):
@@ -303,39 +198,14 @@ def _drill_get(d: dict, path: str):
     return cur
 
 def _effective_booking_url(bot_cfg: dict) -> str:
-    candidates = [
-        "links.booking_url",
-        "booking_url",
-        "calendar_booking_url",
-        "google_calendar_booking_url",
-        "agenda.booking_url",
-    ]
-    for p in candidates:
-        val = _drill_get(bot_cfg or {}, p)
-        val = (val or "").strip() if isinstance(val, str) else ""
-        if _valid_url(val):
-            return val
-    return BOOKING_URL_FALLBACK if _valid_url(BOOKING_URL_FALLBACK) else ""
+    return cfg.effective_booking_url(bot_cfg)
 
 def _effective_app_url(bot_cfg: dict) -> str:
-    candidates = [
-        "links.app_download_url",
-        "links.app_url",
-        "app_download_url",
-        "app_url",
-        "download_url",
-        "link_app",
-    ]
-    for p in candidates:
-        val = _drill_get(bot_cfg or {}, p)
-        val = (val or "").strip() if isinstance(val, str) else ""
-        if _valid_url(val):
-            return val
-    return APP_DOWNLOAD_URL_FALLBACK if _valid_url(APP_DOWNLOAD_URL_FALLBACK) else ""
+    return cfg.effective_app_url(bot_cfg)
 
-# =======================
-#  Intenciones
-# =======================
+# -----------------------
+# Intenciones
+# -----------------------
 SCHEDULE_OFFER_PAT = re.compile(
     r"\b(enlace|link|calendar|calendario|agendar|agenda|reservar|reserva|cita|schedule|book|appointment|meeting|call)\b",
     re.IGNORECASE
@@ -395,9 +265,9 @@ def _can_send_link(clave, cooldown_min=10):
         return False
     return True
 
-# =======================
-#  Firebase: helpers de leads
-# =======================
+# -----------------------
+# Firebase: helpers de leads
+# -----------------------
 def _lead_ref(bot_nombre, numero):
     return db.reference(f"leads/{bot_nombre}/{numero}")
 
@@ -492,9 +362,7 @@ def fb_clear_historial(bot_nombre, numero):
         print(f"❌ Error vaciando historial {bot_nombre}/{numero}: {e}")
         return False
 
-# =======================
-#  ✅ Kill-Switch GLOBAL por bot
-# =======================
+# ✅ Kill-Switch GLOBAL por bot
 def fb_is_bot_on(bot_name: str) -> bool:
     try:
         val = db.reference(f"billing/status/{bot_name}").get()
@@ -506,9 +374,7 @@ def fb_is_bot_on(bot_name: str) -> bool:
         print(f"⚠️ Error leyendo status del bot '{bot_name}': {e}")
     return True  # si no hay dato, asumimos ON
 
-# =======================
-#  ✅ NUEVO: Kill-Switch por conversación (ON/OFF individual)
-# =======================
+# ✅ Kill-Switch por conversación (ON/OFF individual)
 def fb_is_conversation_on(bot_nombre: str, numero: str) -> bool:
     """Devuelve True si la conversación tiene el bot activado; si no existe el flag, asume ON."""
     try:
@@ -534,9 +400,9 @@ def fb_set_conversation_on(bot_nombre: str, numero: str, enabled: bool):
         print(f"⚠️ Error guardando bot_enabled en {bot_nombre}/{numero}: {e}")
         return False
 
-# =======================
-#  🔄 Hidratar sesión desde Firebase (evita perder contexto tras reinicios)
-# =======================
+# -----------------------
+# Hidratar sesión desde Firebase
+# -----------------------
 def _hydrate_session_from_firebase(clave_sesion: str, bot_cfg: dict, sender_number: str):
     if clave_sesion in session_history:
         return
@@ -566,9 +432,9 @@ def _hydrate_session_from_firebase(clave_sesion: str, bot_cfg: dict, sender_numb
         greeted_state[clave_sesion] = True
     follow_up_flags[clave_sesion] = {"5min": False, "60min": False}
 
-# =======================
-#  Rutas UI: Paneles
-# =======================
+# -----------------------
+# Rutas UI
+# -----------------------
 def _load_users():
     """
     Prioridad:
@@ -576,11 +442,9 @@ def _load_users():
     2) Variables de entorno (LEGACY): USER_*, PASS_*, PANEL_*
     3) Usuario por defecto (admin total)
     """
-    # ===== 1) Desde bots/*.json =====
     users_from_json = {}
 
     def _normalize_list_scope(scope_val):
-        # Devuelve lista de bots permitidos o ["*"] si es admin global
         if isinstance(scope_val, str):
             scope_val = scope_val.strip()
             if scope_val == "*":
@@ -598,29 +462,27 @@ def _load_users():
                 allowed.append(_normalize_bot_name(s) or s)
             return allowed or []
         else:
-            return []  # sin scope válido
+            return []
 
-    for cfg in bots_config.values():
-        if not isinstance(cfg, dict):
+    for cfgbot in bots_config.values():
+        if not isinstance(cfgbot, dict):
             continue
-        bot_name = (cfg.get("name") or "").strip()
+        bot_name = (cfgbot.get("name") or "").strip()
         if not bot_name:
             continue
 
-        # Soporta "login": {...}, "logins": [{...}, ...] y "auth": {...} (alias)
         logins = []
-        if isinstance(cfg.get("login"), dict):
-            logins.append(cfg["login"])
-        if isinstance(cfg.get("logins"), list):
-            logins.extend([x for x in cfg["logins"] if isinstance(x, dict)])
-        if isinstance(cfg.get("auth"), dict):  # 🔹 alias compatible
-            logins.append(cfg["auth"])
+        if isinstance(cfgbot.get("login"), dict):
+            logins.append(cfgbot["login"])
+        if isinstance(cfgbot.get("logins"), list):
+            logins.extend([x for x in cfgbot["logins"] if isinstance(x, dict)])
+        if isinstance(cfgbot.get("auth"), dict):
+            logins.append(cfgbot["auth"])
 
         for entry in logins:
             username = (entry.get("username") or "").strip()
             password = (entry.get("password") or "").strip()
 
-            # scope explícito o derivado del "panel" (panel/panel-bot/NOMBRE)
             scope_val = entry.get("scope")
             panel_hint = (entry.get("panel") or "").strip().lower()
 
@@ -640,7 +502,6 @@ def _load_users():
             if not allowed_bots:
                 allowed_bots = [bot_name]
 
-            # Merge si el mismo usuario aparece en varios JSON
             if username in users_from_json:
                 prev_bots = users_from_json[username].get("bots", [])
                 if "*" in prev_bots or "*" in allowed_bots:
@@ -656,7 +517,7 @@ def _load_users():
     if users_from_json:
         return users_from_json
 
-    # ===== 2) LEGACY: variables de entorno =====
+    # LEGACY por entorno
     env_users = {}
     for key, val in os.environ.items():
         if not key.startswith("USER_"):
@@ -682,7 +543,6 @@ def _load_users():
     if env_users:
         return env_users
 
-    # ===== 3) Fallback ultra-básico (admin total) =====
     return {"sundin": {"password": "inhouston2025", "bots": ["*"]}}
 
 def _auth_user(username, password):
@@ -730,8 +590,8 @@ def panel_exclusivo_bot(bot_nombre):
 
 @app.route("/", methods=["GET"])
 def home():
-    print(f"[BOOT] BOOKING_URL_FALLBACK={BOOKING_URL_FALLBACK}")
-    print(f"[BOOT] APP_DOWNLOAD_URL_FALLBACK={APP_DOWNLOAD_URL_FALLBACK}")
+    print(f"[BOOT] BOOKING_URL_FALLBACK={cfg.BOOKING_URL_FALLBACK}")
+    print(f"[BOOT] APP_DOWNLOAD_URL_FALLBACK={cfg.APP_DOWNLOAD_URL_FALLBACK}")
     return "✅ Bot inteligente activo."
 
 @app.route("/login", methods=["GET"])
@@ -746,16 +606,11 @@ def login_html_redirect():
 def panel():
     if not session.get("autenticado"):
         if request.method == "POST":
-            # ✅ Acepta 'usuario' y también 'username' o 'email' (compatibilidad con gestores iOS/Android)
             usuario = (request.form.get("usuario") or request.form.get("username") or request.form.get("email") or "").strip()
-
-            # ✅ Acepta 'clave' o 'password' (para mejores prompts del navegador)
             clave = request.form.get("clave")
             if clave is None or clave == "":
-                clave = request.form.get("password")  # por si el input se llama 'password'
+                clave = request.form.get("password")
             clave = (clave or "").strip()
-
-            # ✅ Sesión persistente si marcaron "Recuérdame"
             remember_flag = (request.form.get("recordarme") or request.form.get("remember") or "").strip().lower()
             remember_on = remember_flag in ("on", "1", "true", "yes", "si", "sí")
 
@@ -764,18 +619,14 @@ def panel():
                 session["autenticado"] = True
                 session["usuario"] = auth["username"]
                 session["bots_permitidos"] = auth["bots"]
-
-                # ✅ Sesión persistente si marcaron "Recuérdame"
                 session.permanent = bool(remember_on)
 
-                # Preparamos redirect de destino
                 if "*" in auth["bots"]:
                     destino_resp = redirect(url_for("panel"))
                 else:
                     destino = _first_allowed_bot()
                     destino_resp = redirect(url_for("panel_exclusivo_bot", bot_nombre=destino)) if destino else redirect(url_for("panel"))
 
-                # ✅ Cookies útiles para autocompletar desde el front si lo deseas
                 resp = make_response(destino_resp)
                 max_age = 60 * 24 * 60 * 60  # 60 días
                 if remember_on:
@@ -786,13 +637,10 @@ def panel():
                     resp.delete_cookie("last_username")
                 return resp
 
-            # 🔴 Login fallido
             return render_template("login.html", error=True)
 
-        # GET no autenticado -> formulario
         return render_template("login.html")
 
-    # Ya autenticado
     if not _is_admin():
         destino = _first_allowed_bot()
         if destino:
@@ -800,8 +648,8 @@ def panel():
 
     leads_todos = fb_list_leads_all()
     bots_disponibles = {}
-    for cfg in bots_config.values():
-        bots_disponibles[cfg["name"]] = cfg.get("business_name", cfg["name"])
+    for cfgbot in bots_config.values():
+        bots_disponibles[cfgbot["name"]] = cfgbot.get("business_name", cfgbot["name"])
 
     bot_seleccionado = request.args.get("bot")
     if bot_seleccionado:
@@ -810,21 +658,26 @@ def panel():
     else:
         leads_filtrados = leads_todos
 
-    return render_template("panel.html", leads=leads_todos, bots= bots_disponibles, bot_seleccionado=bot_seleccionado)
+    return render_template("panel.html", leads=leads_todos, bots=bots_disponibles, bot_seleccionado=bot_seleccionado)
 
 @app.route("/logout", methods=["GET", "POST"])
 def logout():
     session.clear()
-    # También limpiamos las cookies de ayuda (el navegador puede conservar credenciales guardadas por su cuenta)
     resp = make_response(redirect(url_for("panel")))
     resp.delete_cookie("remember_login")
-    # Nota: si quieres conservar last_username al salir, comenta la línea siguiente
     resp.delete_cookie("last_username")
     return resp
 
-# =======================
-#  Guardar/Exportar
-# =======================
+# -----------------------
+# Guardar/Exportar
+# -----------------------
+def _hora_to_epoch_ms(hora_str: str) -> int:
+    try:
+        dt = datetime.strptime(hora_str, "%Y-%m-%d %H:%M:%S")
+        return int(dt.timestamp() * 1000)
+    except Exception:
+        return 0
+
 @app.route("/guardar-lead", methods=["POST"])
 def guardar_edicion():
     data = request.json or {}
@@ -839,7 +692,7 @@ def guardar_edicion():
     bot_normalizado = _normalize_bot_name(bot_nombre) or bot_nombre
 
     try:
-        ref = _lead_ref(bot_normalizado, numero)
+        ref = db.reference(f"leads/{bot_normalizado}/{numero}")
         current = ref.get() or {}
         if estado:
             current["status"] = estado
@@ -875,9 +728,9 @@ def exportar():
     output.seek(0)
     return send_file(output, mimetype="text/csv", download_name="leads.csv", as_attachment=True)
 
-# =======================
-#  ✅ NUEVO: Borrar / Vaciar conversaciones (protegido)
-# =======================
+# -----------------------
+# Borrar / Vaciar conversaciones (protegido)
+# -----------------------
 @app.route("/borrar-conversacion", methods=["POST"])
 def borrar_conversacion_post():
     if not session.get("autenticado"):
@@ -920,7 +773,6 @@ def vaciar_historial_get(bot, numero):
     ok = fb_clear_historial(bot_normalizado, numero)
     return redirect(url_for("conversacion_general", bot=bot_normalizado, numero=numero))
 
-# ✅ ALIAS DE COMPATIBILIDAD CON TU FRONT ACTUAL (/api/delete_chat)
 @app.route("/api/delete_chat", methods=["POST"])
 def api_delete_chat():
     if not session.get("autenticado"):
@@ -934,19 +786,13 @@ def api_delete_chat():
     ok = fb_delete_lead(bot_normalizado, numero)
     return jsonify({"ok": ok, "bot": bot_normalizado, "numero": numero})
 
-# =======================
-#  ✅ API para responder MANUALMENTE desde el panel o la APP (Bearer)
-# =======================
+# -----------------------
+# API manuales y toggles
+# -----------------------
 @app.route("/api/send_manual", methods=["POST", "OPTIONS"])
 def api_send_manual():
-    """
-    JSON esperado: { "bot": "Sara", "numero": "whatsapp:+1786...", "texto": "Tu mensaje" }
-    Envía un mensaje por WhatsApp usando Twilio REST, lo guarda en Firebase como tipo "admin".
-    """
     if request.method == "OPTIONS":
         return ("", 204)
-
-    # ✅ Permitir acceso si hay sesión O si el Authorization Bearer es válido
     if not session.get("autenticado") and not _bearer_ok(request):
         return jsonify({"error": "No autenticado"}), 401
 
@@ -962,7 +808,12 @@ def api_send_manual():
     if session.get("autenticado") and not _user_can_access_bot(bot_normalizado):
         return jsonify({"error": "No autorizado para este bot"}), 403
 
-    from_number = _get_bot_number_by_name(bot_normalizado)  # ej: "whatsapp:+1346..."
+    # Busca el from_ real en bots_config por nombre
+    from_number = ""
+    for number_key, cfgbot in bots_config.items():
+        if isinstance(cfgbot, dict) and (cfgbot.get("name") or "").strip().lower() == bot_normalizado.strip().lower():
+            from_number = number_key
+            break
     if not from_number:
         return jsonify({"error": f"No se encontró el número del bot para '{bot_normalizado}'"}), 400
 
@@ -970,13 +821,11 @@ def api_send_manual():
         return jsonify({"error": "Twilio REST no configurado (TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN)"}), 500
 
     try:
-        # Enviar vía Twilio REST
         twilio_client.messages.create(
             from_=from_number,
             to=numero,
             body=texto
         )
-        # Guardar en historial como "admin"
         ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         fb_append_historial(bot_normalizado, numero, {"tipo": "admin", "texto": texto, "hora": ahora})
         return jsonify({"ok": True})
@@ -984,19 +833,10 @@ def api_send_manual():
         print(f"❌ Error enviando manualmente por Twilio: {e}")
         return jsonify({"error": "Fallo enviando el mensaje"}), 500
 
-# =======================
-#  ✅ API para ON/OFF por conversación (panel o APP con Bearer)
-# =======================
 @app.route("/api/conversation_bot", methods=["POST", "OPTIONS"])
 def api_conversation_bot():
-    """
-    JSON: { "bot": "Sara", "numero": "whatsapp:+1786...", "enabled": true/false }
-    Guarda el flag 'bot_enabled' en Firebase por conversación.
-    """
     if request.method == "OPTIONS":
         return ("", 204)
-
-    # ✅ Permitir sesión o Bearer
     if not session.get("autenticado") and not _bearer_ok(request):
         return jsonify({"error": "No autenticado"}), 401
 
@@ -1015,12 +855,10 @@ def api_conversation_bot():
     ok = fb_set_conversation_on(bot_normalizado, numero, bool(enabled))
     return jsonify({"ok": bool(ok), "enabled": bool(enabled)})
 
-# =======================
-#  🔔 NEW: Endpoints PUSH (evitan HTTP 404)
-# =======================
-
+# -----------------------
+# PUSH/FCM endpoints
+# -----------------------
 def _push_common_data(payload: dict) -> dict:
-    """Sanitiza 'data' para FCM (todos valores deben ser str)."""
     data = {}
     for k, v in (payload or {}).items():
         if v is None:
@@ -1029,7 +867,7 @@ def _push_common_data(payload: dict) -> dict:
     return data
 
 @app.route("/push/topic", methods=["POST", "OPTIONS"])
-@app.route("/api/push/topic", methods=["POST", "OPTIONS"])  # alias de compatibilidad
+@app.route("/api/push/topic", methods=["POST", "OPTIONS"])
 def push_topic():
     if request.method == "OPTIONS":
         return ("", 204)
@@ -1041,7 +879,6 @@ def push_topic():
     body_text = (body.get("body") or body.get("descripcion") or "").strip()
     topic = (body.get("topic") or body.get("segmento") or "todos").strip() or "todos"
 
-    # Datos opcionales para deep-link en la app
     data = _push_common_data({
         "link": body.get("link") or "",
         "screen": body.get("screen") or "",
@@ -1065,7 +902,7 @@ def push_topic():
         return jsonify({"success": False, "message": "FCM error"}), 500
 
 @app.route("/push/token", methods=["POST", "OPTIONS"])
-@app.route("/api/push/token", methods=["POST", "OPTIONS"])  # alias
+@app.route("/api/push/token", methods=["POST", "OPTIONS"])
 def push_token():
     if request.method == "OPTIONS":
         return ("", 204)
@@ -1090,7 +927,7 @@ def push_token():
 
     try:
         if tokens and isinstance(tokens, list) and len(tokens) > 0:
-            multicast = fcm.MulticastMessage(
+            multi = fcm.MulticastMessage(
                 tokens=[str(t) for t in tokens if str(t).strip()],
                 notification=fcm.Notification(title=title, body=body_text),
                 data=data
@@ -1111,12 +948,10 @@ def push_token():
         print(f"❌ Error FCM universal: {e}")
         return jsonify({"success": False, "message": "FCM error"}), 500
 
-# --- Health simple para probar rutas ---
 @app.route("/push/health", methods=["GET"])
 def push_health():
     return jsonify({"ok": True, "service": "push"})
 
-# --- Adaptador universal: acepta /push, /api/push, /push/send, /api/push/send ---
 @app.route("/push", methods=["POST", "OPTIONS"])
 @app.route("/api/push", methods=["POST", "OPTIONS"])
 @app.route("/push/send", methods=["POST", "OPTIONS"])
@@ -1128,11 +963,9 @@ def push_universal():
         return jsonify({"success": False, "message": "Unauthorized"}), 401
 
     body = request.get_json(silent=True) or {}
-
     title = (body.get("title") or body.get("titulo") or "").strip()
     body_text = (body.get("body") or body.get("descripcion") or "").strip()
 
-    # acepta topic/segmento; token único o tokens[]
     topic = (body.get("topic") or body.get("segmento") or "").strip()
     token = (body.get("token") or "").strip()
     tokens = body.get("tokens") if isinstance(body.get("tokens"), list) else None
@@ -1178,9 +1011,9 @@ def push_universal():
         print(f"❌ Error FCM universal: {e}")
         return jsonify({"success": False, "message": "FCM error"}), 500
 
-# =======================
-#  Webhook WhatsApp
-# =======================
+# -----------------------
+# Webhook WhatsApp
+# -----------------------
 @app.route("/webhook", methods=["GET"])
 def verify_whatsapp():
     VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN_WHATSAPP")
@@ -1388,25 +1221,11 @@ def whatsapp_bot():
 
     return str(response)
 
-# =======================
-#  🔊 VOZ con Twilio Gather + OpenAI Speech to Text + Chat Completion
-# =======================
-
+# -----------------------
+# 🔊 VOZ con Twilio + OpenAI TTS
+# -----------------------
 def _voice_get_bot_config(to_number: str) -> dict:
-    """
-    Extrae y normaliza la configuración del bot para llamadas de voz.
-    Mejora: Busca por E.164 para mayor compatibilidad.
-    """
-    canon_to = _canonize_phone(to_number)
-    bot_cfg = None
-    for key, cfg in bots_config.items():
-        if _canonize_phone(key) == canon_to:
-            bot_cfg = cfg
-            break
-    
-    if not bot_cfg:
-        bot_cfg = bots_config.get(to_number)
-
+    bot_cfg = _get_bot_cfg_by_number(to_number)
     if not bot_cfg:
         return None
 
@@ -1415,19 +1234,17 @@ def _voice_get_bot_config(to_number: str) -> dict:
         "model": bot_cfg.get("model", "gpt-4o"),
         "system_prompt": bot_cfg.get("system_prompt", "Eres un asistente de voz amable y natural. Habla con una voz humana."),
         "voice_greeting": bot_cfg.get("voice_greeting", f"Hola, soy el asistente de {bot_cfg.get('business_name', bot_cfg.get('name', 'el bot'))}. ¿Cómo puedo ayudarte?"),
-        "openai_voice": bot_cfg.get("realtime", {}).get("voice", "nova"),
+        "openai_voice": cfg.get_voice(bot_cfg),  # ✅ toma prioridad de entorno / JSON
     }
     return config
 
 def _generate_and_store_greeting(call_sid: str, bot_config: dict):
-    """Genera audio con OpenAI TTS y lo guarda en /tmp. Guarda el nombre del archivo en caché."""
     try:
         greeting_text = bot_config["voice_greeting"]
         openai_voice = bot_config["openai_voice"]
-        
+
         temp_dir = "/tmp"
-        if not os.path.exists(temp_dir):
-            os.makedirs(temp_dir)
+        os.makedirs(temp_dir, exist_ok=True)
         greeting_file_name = f"{call_sid}_greeting.mp3"
         greeting_file_path = os.path.join(temp_dir, greeting_file_name)
 
@@ -1439,37 +1256,33 @@ def _generate_and_store_greeting(call_sid: str, bot_config: dict):
                 speed=1.0
             )
             tts_response.stream_to_file(greeting_file_path)
-        
-        # ✅ CORRECCIÓN: Guardar el nombre del archivo dentro de un diccionario
+
         voice_call_cache[f"{call_sid}_greeting"] = {"audio_file_name": greeting_file_name}
 
     except Exception as e:
         print(f"❌ Error en el hilo al generar el saludo para {call_sid}: {e}")
-        # ✅ CORRECCIÓN: Asegurar que siempre se guarde un diccionario
         voice_call_cache[f"{call_sid}_greeting"] = {"audio_file_name": ""}
 
 def _thread_target_chat(call_sid, user_speech, bot_config):
-    """Función para el hilo de procesamiento de la IA."""
     try:
         if call_sid not in voice_conversation_history:
             voice_conversation_history[call_sid] = [{"role": "system", "content": bot_config["system_prompt"]}]
-        
+
         voice_conversation_history[call_sid].append({"role": "user", "content": user_speech})
-        
+
         chat_completion = client.chat.completions.create(
             model=bot_config["model"],
             messages=voice_conversation_history[call_sid]
         )
         bot_response_text = chat_completion.choices[0].message.content.strip()
-        
+
         voice_conversation_history[call_sid].append({"role": "assistant", "content": bot_response_text})
 
         temp_dir = "/tmp"
-        if not os.path.exists(temp_dir):
-            os.makedirs(temp_dir)
+        os.makedirs(temp_dir, exist_ok=True)
         audio_file_name = f"{call_sid}_{uuid.uuid4().hex[:8]}.mp3"
         audio_file_path = os.path.join(temp_dir, audio_file_name)
-        
+
         tts_response = client.audio.speech.create(
             model="tts-1",
             voice=bot_config["openai_voice"],
@@ -1478,24 +1291,21 @@ def _thread_target_chat(call_sid, user_speech, bot_config):
         )
         tts_response.stream_to_file(audio_file_path)
 
-        # Guardar el nombre del archivo en la caché
         voice_call_cache[call_sid] = {"audio_file_name": audio_file_name}
-        
+
     except Exception as e:
         print(f"❌ Error en el hilo de chat con OpenAI: {e}")
         voice_call_cache[call_sid] = {"audio_file_name": ""}
 
 def _wait_for_audio(call_sid, cache_key, timeout=15):
-    """Espera hasta que el hilo haya generado el audio o se agote el tiempo."""
     start_time = time.time()
     while cache_key not in voice_call_cache and (time.time() - start_time) < timeout:
         time.sleep(0.1)
-    
+
     if cache_key in voice_call_cache:
         return voice_call_cache[cache_key].get("audio_file_name", "")
     return ""
 
-# 1. Webhook inicial para la llamada entrante
 @app.route("/voice", methods=["POST"])
 def voice_webhook():
     to_number = request.values.get("To")
@@ -1508,34 +1318,25 @@ def voice_webhook():
         return str(resp)
 
     print(f"[VOICE] Llamada a '{bot_config['bot_name']}' iniciada.")
-    
-    # ✅ CORRECCIÓN: Iniciar el procesamiento del saludo en un hilo separado
-    # Se añade la entrada a voice_call_cache para que el hilo sepa dónde guardar el resultado
+
     voice_call_cache[f"{call_sid}_greeting"] = {"audio_file_name": "placeholder"}
     Thread(target=_generate_and_store_greeting, args=(call_sid, bot_config), daemon=True).start()
 
     resp = VoiceResponse()
-    # Usar <Gather> para escuchar la respuesta del usuario
     gather = Gather(
-        input="speech", 
+        input="speech",
         action=url_for('voice_gather', _external=True),
         speech_model="phone_call",
         speech_timeout="auto",
         language="es-ES"
     )
-    # Se omite el .say() para evitar que twilio genere audio robotico
     resp.append(gather)
-    
-    # Se redirige inmediatamente para ir al "gather" que espera el saludo
     resp.redirect(url_for('voice_gather', _external=True))
-    
     return str(resp)
 
-# 2. Webhook para procesar el audio del usuario
 @app.route("/voice-gather", methods=["POST"])
 def voice_gather():
     resp = VoiceResponse()
-    
     user_speech = request.values.get("SpeechResult", "").strip()
     call_sid = request.values.get("CallSid")
     to_number = request.values.get("To")
@@ -1544,24 +1345,20 @@ def voice_gather():
     if not bot_config:
         resp.say("Lo siento, hubo un problema técnico.")
         return str(resp)
-        
+
     if user_speech:
         print(f"[VOICE] Mensaje del usuario: {user_speech}")
-        
-        # ✅ CORRECCIÓN: Iniciar el procesamiento de la IA en un hilo separado
         _thread_target_chat(call_sid, user_speech, bot_config)
         audio_file_name = _wait_for_audio(call_sid, call_sid, timeout=15)
-        
+
         if audio_file_name:
             print(f"[VOICE] Reproduciendo respuesta del bot desde: {audio_file_name}")
             resp.play(f"{request.host_url}voice-audio/{audio_file_name}")
         else:
             print(f"❌ Error: No se pudo obtener la URL de audio a tiempo.")
             resp.say("Lo siento, estoy teniendo un problema y no pude responder.")
-        
+
     else:
-        # ✅ CORRECCIÓN: En la primera llamada a voice_gather, el usuario no ha hablado,
-        # así que reproducimos el saludo.
         greeting_file_name = _wait_for_audio(call_sid, f"{call_sid}_greeting")
         if greeting_file_name:
             resp.play(f"{request.host_url}voice-audio/{greeting_file_name}")
@@ -1569,17 +1366,16 @@ def voice_gather():
             resp.say("Lo siento, no pude generar el saludo.")
 
     gather = Gather(
-        input="speech", 
-        action=url_for('voice_gather', _external=True), 
+        input="speech",
+        action=url_for('voice_gather', _external=True),
         speech_model="phone_call",
         speech_timeout="auto",
         language="es-ES"
     )
     resp.append(gather)
-    
+
     return str(resp)
 
-# 3. Endpoint para servir el archivo de audio
 @app.route("/voice-audio/<filename>", methods=["GET"])
 def voice_audio(filename):
     file_path = os.path.join("/tmp", filename)
@@ -1589,9 +1385,9 @@ def voice_audio(filename):
         print(f"❌ Error 404: Archivo no encontrado en {file_path}")
         return "Archivo no encontrado", 404
 
-# =======================
-#  Vistas de conversación (leen Firebase)
-# =======================
+# -----------------------
+# Vistas de conversación
+# -----------------------
 @app.route("/conversacion_general/<bot>/<numero>")
 def chat_general(bot, numero):
     if not session.get("autenticado"):
@@ -1634,15 +1430,13 @@ def chat_bot(bot, numero):
 
     return render_template("chat_bot.html", numero=numero, mensajes=mensajes, bot=bot_normalizado, bot_data=bot_cfg, company_name=company_name)
 
-# =======================
-#  API de polling (leen Firebase) — ahora permite Bearer
-# =======================
+# -----------------------
+# API de polling
+# -----------------------
 @app.route("/api/chat/<bot>/<numero>", methods=["GET", "OPTIONS"])
 def api_chat(bot, numero):
     if request.method == "OPTIONS":
         return ("", 204)
-
-    # ✅ Permitir sesión o Bearer
     if not session.get("autenticado") and not _bearer_ok(request):
         return jsonify({"error": "No autenticado"}), 401
 
@@ -1679,16 +1473,15 @@ def api_chat(bot, numero):
                 last_ts = ts
         nuevos = [{"texto": reg.get("texto", ""), "hora": reg.get("hora", ""), "tipo": reg.get("tipo", "user"), "ts": _hora_to_epoch_ms(reg.get("hora", ""))} for reg in historial]
 
-    # ✅ Adjuntamos estado ON/OFF por conversación para que el front muestre el botón correcto
     bot_enabled = fb_is_conversation_on(bot_normalizado, numero)
 
     return jsonify({"mensajes": nuevos, "last_ts": last_ts, "bot_enabled": bool(bot_enabled)})
 
-# =======================
-#  Run
-# =======================
+# -----------------------
+# Run
+# -----------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    print(f"[BOOT] BOOKING_URL_FALLBACK={BOOKING_URL_FALLBACK}")
-    print(f"[BOOT] APP_DOWNLOAD_URL_FALLBACK={APP_DOWNLOAD_URL_FALLBACK}")
+    print(f"[BOOT] BOOKING_URL_FALLBACK={cfg.BOOKING_URL_FALLBACK}")
+    print(f"[BOOT] APP_DOWNLOAD_URL_FALLBACK={cfg.APP_DOWNLOAD_URL_FALLBACK}")
     app.run(host="0.0.0.0", port=port)
