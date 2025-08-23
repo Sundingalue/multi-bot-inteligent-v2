@@ -77,25 +77,6 @@ if APP_DOWNLOAD_URL_FALLBACK and not _valid_url(APP_DOWNLOAD_URL_FALLBACK):
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 app = Flask(__name__)
-# === ElevenLabs ConvAI - Config mínima (no rompe nada existente) ===
-ELEVEN_API_KEY = (os.getenv("ELEVENLABS_API_KEY") or "").strip()
-ELEVEN_OUTBOUND_URL = "https://api.elevenlabs.io/v1/convai/twilio/outbound-call"
-
-# Ruta del JSON con los IDs del Agent (lo guardaste en bots/)
-ELEVEN_JSON_PATH = os.path.join(os.path.dirname(__file__), "bots", "elevenlabs_convai.json")
-
-def _load_eleven_agent_min():
-    with open(ELEVEN_JSON_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def _xi_headers_min():
-    if not ELEVEN_API_KEY:
-        raise RuntimeError("Falta ELEVENLABS_API_KEY en Render → Settings → Environment")
-    return {
-        "xi-api-key": ELEVEN_API_KEY,
-        "Content-Type": "application/json",
-    }
-
 app.secret_key = "supersecreto_sundin_panel_2025"
 
 # ✅ Sesión persistente (remember me)
@@ -1702,44 +1683,6 @@ def api_chat(bot, numero):
     bot_enabled = fb_is_conversation_on(bot_normalizado, numero)
 
     return jsonify({"mensajes": nuevos, "last_ts": last_ts, "bot_enabled": bool(bot_enabled)})
-
-@app.route("/eleven/outbound-call", methods=["POST"])
-def eleven_outbound_call_min():
-    """
-    Inicia una llamada saliente con ElevenLabs ConvAI (Twilio gestionado por ElevenLabs).
-    Body JSON opcional:
-      { "to_number": "+1XXXXXXXXXX" }
-    Si no mandas body, usa 'to_number' del bots/elevenlabs_convai.json.
-    """
-    try:
-        cfg = _load_eleven_agent_min()
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"No pude leer bots/elevenlabs_convai.json: {e}"}), 500
-
-    # 1) número destino: primero usa el del body, si no, toma el del JSON
-    body = request.get_json(silent=True) or {}
-    to_number = (body.get("to_number") or cfg.get("to_number") or "").strip()
-    if not to_number:
-        return jsonify({"ok": False, "error": "Falta 'to_number' (en el body o en bots/elevenlabs_convai.json)"}), 400
-
-    agent_id = (cfg.get("agent_id") or "").strip()
-    phone_id = (cfg.get("agent_phone_number_id") or "").strip()
-    if not agent_id or not phone_id:
-        return jsonify({"ok": False, "error": "Faltan 'agent_id' o 'agent_phone_number_id' en bots/elevenlabs_convai.json"}), 400
-
-    payload = {
-        "agent_id": agent_id,
-        "agent_phone_number_id": phone_id,
-        "to_number": to_number
-    }
-
-    try:
-        resp = requests.post(ELEVEN_OUTBOUND_URL, headers=_xi_headers_min(), json=payload, timeout=30)
-        data = resp.json() if "application/json" in (resp.headers.get("Content-Type") or "") else {"text": resp.text}
-        return jsonify({"ok": resp.ok, "status": resp.status_code, "data": data}), resp.status_code
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
 
 # =======================
 #  Run
