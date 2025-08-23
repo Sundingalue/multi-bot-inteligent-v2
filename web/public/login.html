@@ -39,7 +39,7 @@
   <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 
-  <script>
+<script>
     // 👇👇👇 REEMPLAZA ESTE OBJETO CON TU CONFIG DE LA APP WEB EN FIREBASE 👇👇👇
     // Firebase Console → Engranaje (Configuración del proyecto) → Tus apps → Web → Configurar SDK
    const firebaseConfig = {
@@ -77,9 +77,18 @@
         // 2) Enviar token al backend para crear cookie de sesión
         const resp = await fetch('/sessionLogin', {
           method: 'POST',
-          headers: {'Content-Type': 'application/json'},
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ idToken }),
           credentials: 'include' // importante para la cookie
         });
 
         if (!resp.ok) {
+          const errText = await resp.text();
+          throw new Error('Fallo en sesión: ' + errText);
+        }
+
+      } catch (e) {
+        errorDiv.textContent = 'Error: ' + (e.message || e);
+      }
+    }); // 👈 cierre del addEventListener
+</script>
