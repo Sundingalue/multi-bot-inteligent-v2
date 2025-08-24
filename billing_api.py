@@ -598,6 +598,37 @@ def _download_file(url: str, timeout: int = 15):
         print("[download] ⚠️ Error descargando", url, e)
         return None, None
 
+# ====== [NUEVO] Normalización y matching por número ======
+def _normalize_number(value: str):
+    """
+    Devuelve (proto, numE164) donde proto ∈ {'tel','whatsapp'} y numE164 comienza con '+'.
+    Acepta formatos: '+1...', 'whatsapp:+1...', '1 (555) 123-4567', etc.
+    """
+    if not value:
+        return ('tel', '')
+    v = str(value).strip()
+    proto = 'tel'
+    if v.lower().startswith('whatsapp:'):
+        proto = 'whatsapp'
+        v = v[len('whatsapp:'):]
+    v = re.sub(r'[\s\-\(\)]', '', v)
+    if not v.startswith('+') and re.match(r'^\d{8,15}$', v):
+        v = '+' + v
+    return (proto, v)
+
+def _get_bot_by_number(called_number: str, bots: dict):
+    if not called_number:
+        return None
+    _, num = _normalize_number(called_number)
+    if not num:
+        return None
+    for cfg in bots.values():
+        for key in ('twilio_number', 'whatsapp_number'):
+            _, n2 = _normalize_number(cfg.get(key) or '')
+            if n2 and n2 == num:
+                return cfg
+    return None
+
 # ====== Resolución de destinatarios por BOT ======
 def _extract_emails_from_cfg(cfg: dict) -> list:
     emails = []
@@ -621,8 +652,9 @@ def _extract_emails_from_cfg(cfg: dict) -> list:
 def _find_bot_cfg_for_payload(payload: dict) -> dict:
     """
     Intenta identificar el bot a partir de varios campos:
-    - data.metadata.phone_call.agent_number (Número del bot en la llamada)
-    - system__called_number (dynamic_variables)
+    - PRIORIDAD: número llamado (Twilio/WhatsApp) → match exacto por número en el JSON
+    - data.metadata.phone_call.agent_number (número del bot)
+    - dynamic_variables.system__called_number
     - to / agent_number / whatsapp_number / twilio_number
     - slug, name
     """
@@ -659,6 +691,12 @@ def _find_bot_cfg_for_payload(payload: dict) -> dict:
             v = (extra.get(key) or "").strip()
             if v: candidates.append(v)
 
+    # 0) PRIORIDAD: Match por número normalizado contra twilio_number/whatsapp_number
+    for cand in candidates:
+        cfg_num = _get_bot_by_number(cand, bots)
+        if cfg_num:
+            return cfg_num
+
     # 1) Coincidencia exacta de slug
     for cand in candidates:
         if cand in bots:
@@ -670,21 +708,12 @@ def _find_bot_cfg_for_payload(payload: dict) -> dict:
             if str(cfg.get("name","")).strip().lower() == cand.strip().lower():
                 return cfg
 
-    # 3) Coincidencia por número (twilio/whatsapp)
-    for cand in candidates:
-        c = cand.strip().lower()
-        for cfg in bots.values():
-            if str(cfg.get("twilio_number","")).strip().lower() == c:
-                return cfg
-            if str(cfg.get("whatsapp_number","")).strip().lower() == c:
-                return cfg
-
-    # 4) Fallback: 'to' como slug
+    # 3) Fallback: 'to' como slug
     to_v = (payload.get("to") or "").strip()
     if to_v and to_v in bots:
         return bots[to_v]
 
-    # 5) Último recurso: primero
+    # 4) Último recurso: primero
     for cfg in bots.values():
         return cfg
     return {}
@@ -776,7 +805,7 @@ def eleven_post_call():
     data = payload.get("data") or {}
     transcript_list = data.get("transcript") or payload.get("transcript") or []
 
-    # Números desde metadata (preferido para identificar bot correcto)
+    # Números desde metadata / dynamic variables / payload
     meta = data.get("metadata") or {}
     phone_call = meta.get("phone_call") or {}
     agent_phone_number = (phone_call.get("agent_number") or "").strip()  # número del bot en la llamada
@@ -784,27 +813,32 @@ def eleven_post_call():
                      payload.get("caller") or payload.get("from") or payload.get("phone") or
                      (payload.get("call") or {}).get("from") or "").strip()
 
-    # Bot detectado por número/slug/nombre
-    cfg_guess = _find_bot_cfg_for_payload(payload)
-    # Si el número del agente viene en metadata, intenta casar exactamente por número
-    if agent_phone_number:
-        bots = load_bots_folder()
-        for cfg in bots.values():
-            nums = [str(cfg.get("whatsapp_number","")).strip().lower(),
-                    str(cfg.get("twilio_number","")).strip().lower()]
-            if agent_phone_number.strip().lower() in nums:
-                cfg_guess = cfg
+    ci = data.get("conversation_initiation_client_data") or {}
+    dyn = ci.get("dynamic_variables") or {}
+    dyn_called_number = (dyn.get("system__called_number") or "").strip()
+
+    # Intento 1: detectar por número llamado (PRIORIDAD)
+    bots = load_bots_folder()
+    cfg_guess = None
+    for cand in (agent_phone_number, dyn_called_number,
+                 payload.get("to"), payload.get("twilio_to"),
+                 (payload.get("extra") or {}).get("to"),
+                 (payload.get("extra") or {}).get("agent_number")):
+        if cand:
+            cfg_n = _get_bot_by_number(cand, bots)
+            if cfg_n:
+                cfg_guess = cfg_n
                 break
 
-    # Nombre del agente: prioriza el del bot detectado
-    agent_name = (
-        (cfg_guess.get("name") if cfg_guess else None) or
-        payload.get("agent") or payload.get("bot") or payload.get("agent_name") or
-        (payload.get("call") or {}).get("agent") or
-        data.get("agent_name") or
-        _first_bot_name() or
-        "Agente"
-    )
+    # Intento 2: heurística previa (slug/name/etc.)
+    if not cfg_guess:
+        cfg_guess = _find_bot_cfg_for_payload(payload)
+
+    # Nombre a mostrar en el correo: BUSINESS NAME (no el name interno)
+    business_name = (cfg_guess.get("business_name") if cfg_guess else None) or \
+                    (cfg_guess.get("name") if cfg_guess else None) or \
+                    _first_bot_name() or "Agente"
+    agent_name = business_name  # <- usar business_name para encabezado
 
     # Número del agente a mostrar: metadata → bot cfg
     agent_number_display = agent_phone_number or (
@@ -844,8 +878,8 @@ def eleven_post_call():
     # Render final
     text_plain, html_body = _build_branded_email(agent_name, agent_number_display, transcript_list)
 
-    # Asunto: nombre del agente + número del cliente (si lo hay)
-    subj = f"[Post-Call] {agent_name} – {caller_number or 'desconocido'}"
+    # Asunto: BUSINESS NAME + número del cliente (si lo hay)
+    subj = f"[Post-Call] {business_name} – {caller_number or 'desconocido'}"
 
     _send_email(subj, text_plain, attachments, to_addrs=recipients, html_body=html_body)
     return jsonify({"ok": True})
