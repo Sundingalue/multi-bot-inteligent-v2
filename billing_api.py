@@ -563,6 +563,9 @@ from email.message import EmailMessage
 from urllib.request import urlopen
 from urllib.error import URLError, HTTPError
 
+# === NUEVO: imports para verificación HMAC
+import hmac, hashlib
+
 def _smtp_settings():
     return {
         "host": os.getenv("SMTP_HOST", "").strip(),
@@ -619,6 +622,49 @@ def _download_file(url: str, timeout: int = 15):
         print("[download] ⚠️ Error descargando", url, e)
         return None, None
 
+# === NUEVO: helper para verificar la firma de ElevenLabs (HMAC-SHA256)
+def _verify_eleven_hmac(sig_header: str, raw_body: bytes) -> bool:
+    """
+    ElevenLabs envía un encabezado con la firma HMAC. El formato puede variar:
+      - solo el hex digest
+      - 'sha256=<hex>'
+      - 't=...,v1=<hex>'
+    Comparamos de manera constante contra el digest calculado.
+    """
+    secret = (os.getenv("ELEVEN_WEBHOOK_SECRET") or "").encode("utf-8")
+    if not secret:
+        print("[eleven_webhook] ⚠️ ELEVEN_WEBHOOK_SECRET no configurado. Se acepta SIN verificar.")
+        return True  # si no hay secreto, permitimos para no bloquear en pruebas
+
+    if not sig_header:
+        print("[eleven_webhook] ❌ Falta encabezado de firma")
+        return False
+
+    # firma calculada
+    calc_hex = hmac.new(secret, raw_body or b"", hashlib.sha256).hexdigest()
+
+    # normalizar lo que llegó
+    header = sig_header.strip()
+    candidates = set()
+
+    # caso directo
+    candidates.add(header)
+    # posible prefijo
+    if header.startswith("sha256="):
+        candidates.add(header.split("=", 1)[1].strip())
+
+    # posible lista tipo "t=...,v1=xxxx"
+    if "," in header and "=" in header:
+        parts = [p.strip() for p in header.split(",")]
+        for p in parts:
+            if p.startswith("v1="):
+                candidates.add(p.split("=", 1)[1].strip())
+
+    ok = any(hmac.compare_digest(calc_hex, c) for c in candidates)
+    if not ok:
+        print("[eleven_webhook] ❌ Firma inválida. header=", header, " calc=", calc_hex)
+    return ok
+
 @billing_bp.route("/webhooks/eleven/post-call", methods=["POST"])
 def eleven_post_call():
     """
@@ -632,6 +678,14 @@ def eleven_post_call():
       - agent / bot (nombre)
       - extra: { name, lastname, email, ... }
     """
+
+    # === NUEVO: verificación HMAC antes de procesar ===
+    raw = request.get_data(cache=False, as_text=False)
+    sig = request.headers.get("ElevenLabs-Signature") or request.headers.get("X-ElevenLabs-Signature") or ""
+    if not _verify_eleven_hmac(sig, raw):
+        return jsonify({"ok": False, "error": "invalid_signature"}), 401
+
+    # ahora sí, parseamos el JSON
     payload = request.get_json(silent=True) or {}
     print("[eleven_webhook] payload:", payload)
 
