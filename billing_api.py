@@ -2,7 +2,6 @@
 # Maestro de Facturación (panel factura clientes) + Gráficos en vivo
 # - Endpoints: clients, toggle, consumption (legacy), service-item, usage, invoice, usage_ts, track/openai
 # - Página /billing/panel: tabla + modal de detalle + sección de gráficos en vivo
-# - **NUEVO**: Bots CRUD para WordPress (/billing/bots)
 
 from flask import Blueprint, request, jsonify
 from datetime import datetime, timedelta
@@ -38,32 +37,17 @@ def _as_float(x, default=0.0):
 # =======================
 # Bots loader
 # =======================
-def _bots_dir():
+def load_bots_folder():
+    bots = {}
     base_dir = os.path.dirname(os.path.abspath(__file__))
     bots_dir = os.path.join(base_dir, "bots")
-    os.makedirs(bots_dir, exist_ok=True)
-    return bots_dir
-
-def load_bots_folder():
-    """
-    Carga todos los JSON dentro de /bots.
-    - Soporta archivos con estructura {slug: {config}} (preferida)
-    - y también un único bot como dict con campo 'slug'.
-    """
-    bots = {}
-    bots_dir = _bots_dir()
     for path in glob.glob(os.path.join(bots_dir, "*.json")):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                # Forma preferida: {slug: {...}}
                 if isinstance(data, dict):
-                    # Si parece un único bot con 'slug'
-                    if "slug" in data and isinstance(data["slug"], str):
-                        bots[data["slug"]] = data
-                    else:
-                        for k, v in data.items():
-                            bots[k] = v
+                    for k, v in data.items():
+                        bots[k] = v
         except Exception as e:
             print(f"[billing_api] ⚠️ No se pudo cargar {path}: {e}")
     return bots
@@ -289,7 +273,7 @@ def _set_service_item(bot: str, enabled: bool, amount: float, label: str):
     return payload
 
 # =======================
-# Endpoints públicos JSON (existentes)
+# Endpoints públicos JSON
 # =======================
 @billing_bp.route("/health", methods=["GET"])
 def health():
@@ -474,124 +458,8 @@ def track_openai():
     record_openai_usage(bot, model, itok, otok)
     return jsonify({"success": True})
 
-# ====================================================================
-# === NUEVO: CRUD de Bots para integrarse con WordPress (/billing/bots)
-# ====================================================================
-
-def _bot_file_path(slug: str) -> str:
-    """Archivo físico recomendado: bots/<slug>.json con formato {slug: {...}}."""
-    slug = (slug or "").strip()
-    safe = "".join([c for c in slug if c.isalnum() or c in ("-", "_")]).lower()
-    if not safe:
-        raise ValueError("slug inválido")
-    return os.path.join(_bots_dir(), f"{safe}.json")
-
-def _normalize_bot_payload(d: dict) -> dict:
-    """Normaliza campos esperados por tu proyecto."""
-    d = dict(d or {})
-    d["slug"] = (d.get("slug") or "").strip() or (d.get("name") or "").strip().lower().replace(" ", "-")
-    d["name"] = (d.get("name") or d["slug"]).strip()
-    # Campos comunes
-    d.setdefault("system_prompt", d.get("prompt") or "")
-    d.setdefault("voice", d.get("voice") or "")
-    d.setdefault("lang", d.get("lang") or "es")
-    d.setdefault("tone", d.get("tone") or "")
-    d.setdefault("temperature", float(d.get("temperature") or 0.7))
-    d.setdefault("tts_speed", float(d.get("tts_speed") or 1.0))
-    d.setdefault("tts_pitch", float(d.get("tts_pitch") or 0))
-    d.setdefault("greeting", d.get("greeting") or "")
-    # campos de negocio opcionales
-    d.setdefault("business_name", d.get("business_name") or d["name"])
-    return d
-
-@billing_bp.route("/bots", methods=["GET", "POST"])
-def bots_collection():
-    """
-    GET  -> lista bots (slug + name) para WP
-    POST -> crea/actualiza un bot (escribe archivo en /bots)
-    """
-    if request.method == "GET":
-        bots = load_bots_folder()
-        # Normalizamos salida a [{slug, name, ...}]
-        out = []
-        for k, v in bots.items():
-            item = dict(v or {})
-            item["slug"] = item.get("slug") or k
-            item["name"] = item.get("name") or item["slug"]
-            out.append({"slug": item["slug"], "name": item["name"]})
-        out.sort(key=lambda x: x["name"].lower())
-        return jsonify({"success": True, "data": out})
-
-    # POST (crear/actualizar)
-    data = request.get_json(silent=True) or {}
-    try:
-        norm = _normalize_bot_payload(data)
-        if not norm.get("slug"):
-            return jsonify({"success": False, "message": "slug es requerido"}), 400
-        path = _bot_file_path(norm["slug"])
-        # Guardamos en formato {slug: {...}}
-        to_write = { norm["slug"]: norm }
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(to_write, f, ensure_ascii=False, indent=2)
-        return jsonify({"success": True, "data": norm})
-    except ValueError as e:
-        return jsonify({"success": False, "message": str(e)}), 400
-    except Exception as e:
-        print("[billing_api] ❌ Guardando bot:", e)
-        return jsonify({"success": False, "message": "Error guardando bot"}), 500
-
-@billing_bp.route("/bots/<slug>", methods=["GET", "DELETE"])
-def bot_item(slug):
-    """
-    GET    -> devuelve config completa del bot
-    DELETE -> elimina archivo bots/<slug>.json
-    """
-    safe_slug = (slug or "").strip()
-    if not safe_slug:
-        return jsonify({"success": False, "message": "slug requerido"}), 400
-
-    if request.method == "GET":
-        bots = load_bots_folder()
-        item = bots.get(safe_slug)
-        if not item:
-            # intentar por name
-            for k, v in bots.items():
-                if (v or {}).get("name", "").lower() == safe_slug.lower():
-                    item = v; item["slug"] = k; break
-        if not item:
-            return jsonify({"success": False, "message": "No encontrado"}), 404
-        # asegurar slug
-        item = dict(item)
-        item["slug"] = item.get("slug") or safe_slug
-        return jsonify({"success": True, "data": item})
-
-    # DELETE
-    try:
-        path = _bot_file_path(safe_slug)
-        if os.path.exists(path):
-            os.remove(path)
-        else:
-            # También soporta archivos que hubieran sido guardados como {slug:{}} con otro nombre
-            # Intentar localizar por patrón
-            found = False
-            for p in glob.glob(os.path.join(_bots_dir(), "*.json")):
-                try:
-                    with open(p, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                        if isinstance(data, dict) and safe_slug in data:
-                            os.remove(p); found=True; break
-                except: pass
-            if not found:
-                return jsonify({"success": False, "message": "No encontrado"}), 404
-        return jsonify({"success": True})
-    except ValueError as e:
-        return jsonify({"success": False, "message": str(e)}), 400
-    except Exception as e:
-        print("[billing_api] ❌ Eliminando bot:", e)
-        return jsonify({"success": False, "message": "Error eliminando bot"}), 500
-
 # =======================
-# Página HTML del panel + gráficos (EXISTENTE)
+# Página HTML del panel + gráficos
 # =======================
 @billing_bp.route("/panel", methods=["GET"])
 def billing_panel():
