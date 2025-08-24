@@ -111,56 +111,6 @@ def _service_item_ref(bot_name: str):
 def _openai_day_ref(bot_name: str, ymd: str):
     return db.reference(f"billing/openai/{bot_name}/{ymd}/aggregate")
 
-# ===== NUEVO: notify emails por bot =====
-def _notify_emails_ref(bot_name: str):
-    return db.reference(f"billing/notify_emails/{bot_name}")
-
-def _listify_emails(v):
-    if not v:
-        return []
-    if isinstance(v, list):
-        return [str(x).strip() for x in v if str(x).strip()]
-    if isinstance(v, str):
-        return [s.strip() for s in re.split(r"[,\n;]+", v) if s.strip()]
-    return []
-
-def _emails_for_bot(bot_name: str):
-    """Prioridad: Firebase -> bots/<slug>.json -> EMAIL_TO global."""
-    emails = []
-    # 1) Firebase (permite cambiar sin redeploy)
-    try:
-        v = _notify_emails_ref(bot_name).get()
-        emails = _listify_emails(v)
-    except Exception as e:
-        print(f"[billing_api] ⚠️ notify_emails Firebase {bot_name}: {e}")
-
-    # 2) Archivo bots/*.json
-    if not emails:
-        cfgs = load_bots_folder()
-        # match por name o slug
-        cfg = None
-        for c in cfgs.values():
-            n = (c.get("name") or c.get("slug") or "").strip()
-            if n.lower() == (bot_name or "").lower():
-                cfg = c
-                break
-        if cfg:
-            # notify.emails (lista o string)
-            if isinstance(cfg.get("notify"), dict):
-                emails = _listify_emails(cfg["notify"].get("emails"))
-            # fallback: emails (lista), contact.email (string)
-            if not emails:
-                emails = _listify_emails(cfg.get("emails"))
-            if not emails and isinstance(cfg.get("contact"), dict):
-                emails = _listify_emails(cfg["contact"].get("email"))
-
-    # 3) Fallback global
-    if not emails:
-        env = os.getenv("EMAIL_TO", "")
-        emails = _listify_emails(env)
-
-    return emails
-
 # =======================
 # ON/OFF
 # =======================
@@ -625,21 +575,20 @@ def _smtp_settings():
 
 def _send_email(subject: str, body_text: str, attachments: list = None, to_addrs: list = None):
     """attachments: lista de dicts {"filename": str, "content": bytes, "mime": "audio/mpeg" ...}
-       to_addrs: lista de destinatarios (si None, usa EMAIL_TO global)."""
+       to_addrs: lista de destinatarios (si None, usa EMAIL_TO del entorno)"""
     cfg = _smtp_settings()
-    recipients = to_addrs if (to_addrs and len(to_addrs)) else cfg["to_addrs"]
-
-    if not (cfg["host"] and cfg["from_addr"] and recipients):
-        print("[email] ⚠️ SMTP no configurado (SMTP_HOST/PORT/USER/PASS, EMAIL_FROM o destinatarios). Solo log.")
+    final_to = to_addrs if (to_addrs and len(to_addrs)>0) else cfg["to_addrs"]
+    if not (cfg["host"] and cfg["from_addr"] and final_to):
+        print("[email] ⚠️ SMTP no configurado o sin destinatarios (SMTP_HOST/PORT/USER/PASS, EMAIL_FROM, EMAIL_TO o to_addrs). Solo log.")
         print("[email] Asunto:", subject)
-        print("[email] Para:", recipients or "(vacío)")
+        print("[email] Para:", final_to or "(vacío)")
         print("[email] Texto:\n", body_text)
         return False
 
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = cfg["from_addr"]
-    msg["To"] = ", ".join(recipients)
+    msg["To"] = ", ".join(final_to)
     msg.set_content(body_text)
 
     for att in (attachments or []):
@@ -657,7 +606,7 @@ def _send_email(subject: str, body_text: str, attachments: list = None, to_addrs
             if cfg["user"]:
                 server.login(cfg["user"], cfg["password"])
             server.send_message(msg)
-        print("[email] ✉️ Enviado OK →", recipients)
+        print("[email] ✉️ Enviado OK a:", final_to)
         return True
     except Exception as e:
         print("[email] ❌ Error SMTP:", e)
@@ -673,6 +622,97 @@ def _download_file(url: str, timeout: int = 15):
         print("[download] ⚠️ Error descargando", url, e)
         return None, None
 
+# ====== NUEVO: Resolución de destinatarios por BOT ======
+def _extract_emails_from_cfg(cfg: dict) -> list:
+    """Devuelve lista de correos en orden de prioridad:
+       notify.emails -> emails -> contact.email"""
+    emails = []
+
+    # notify.emails (preferido)
+    notify = cfg.get("notify") or {}
+    if isinstance(notify, dict):
+        arr = notify.get("emails")
+        if isinstance(arr, list):
+            emails.extend([e for e in arr if isinstance(e, str) and e.strip()])
+
+    # emails (array)
+    if not emails:
+        arr2 = cfg.get("emails")
+        if isinstance(arr2, list):
+            emails.extend([e for e in arr2 if isinstance(e, str) and e.strip()])
+
+    # contact.email (string)
+    if not emails:
+        contact = cfg.get("contact") or {}
+        if isinstance(contact, dict):
+            ce = contact.get("email")
+            if isinstance(ce, str) and ce.strip():
+                emails.append(ce.strip())
+
+    # Normaliza espacios
+    return [e.strip() for e in emails if e and isinstance(e, str)]
+
+def _find_bot_cfg_for_payload(payload: dict) -> dict:
+    """Intenta identificar el bot según varios campos del payload y la carpeta ./bots"""
+    bots = load_bots_folder()
+    if not bots:
+        return {}
+
+    # Posibles llaves en el payload
+    candidates = []
+    # nombres/identificadores comunes
+    for key in ("bot_slug","agent_slug","bot","agent","agent_name","assistant","assistant_name"):
+        v = (payload.get(key) or "").strip()
+        if v: candidates.append(v)
+    # números/líneas
+    for key in ("agent_number","twilio_to","to","line","number","assistant_number"):
+        v = (payload.get(key) or "").strip()
+        if v: candidates.append(v)
+
+    # También busca dentro de "extra"
+    extra = payload.get("extra") or {}
+    if isinstance(extra, dict):
+        for key in ("bot","agent","agent_number","to","twilio_to","number"):
+            v = (extra.get(key) or "").strip()
+            if v: candidates.append(v)
+
+    # 1) Coincidencia exacta de slug
+    for cand in candidates:
+        if cand in bots:
+            return bots[cand]
+
+    # 2) Coincidencia por nombre
+    for cand in candidates:
+        for cfg in bots.values():
+            if str(cfg.get("name","")).strip().lower() == cand.strip().lower():
+                return cfg
+
+    # 3) Coincidencia por número (twilio_number / whatsapp_number)
+    for cand in candidates:
+        c = cand.strip().lower()
+        for cfg in bots.values():
+            if str(cfg.get("twilio_number","")).strip().lower() == c:
+                return cfg
+            if str(cfg.get("whatsapp_number","")).strip().lower() == c:
+                return cfg
+
+    # 4) Último intento: si payload tiene 'to' con formato whatsapp:+E164 y hay un bot con ese slug
+    to_v = (payload.get("to") or "").strip()
+    if to_v and to_v in bots:
+        return bots[to_v]
+
+    return {}
+
+def _bot_emails_for_event(payload: dict) -> list:
+    """Obtiene lista de emails específicos del bot. Si no hay, usa EMAIL_TO."""
+    cfg = _find_bot_cfg_for_payload(payload)
+    emails = _extract_emails_from_cfg(cfg) if cfg else []
+    if emails:
+        return emails
+    # fallback: EMAIL_TO global
+    env_to = [a.strip() for a in (os.getenv("EMAIL_TO","").split(",") if os.getenv("EMAIL_TO") else []) if a.strip()]
+    return env_to
+
 @billing_bp.route("/webhooks/eleven/post-call", methods=["POST"])
 def eleven_post_call():
     """
@@ -683,14 +723,14 @@ def eleven_post_call():
       - transcript (texto)
       - summary (opcional)
       - recordings: [ { "url": "...", "format": "mp3" }, ... ]
-      - agent / bot (nombre)
+      - agent / bot (nombre o slug)
       - extra: { name, lastname, email, ... }
     """
     payload = request.get_json(silent=True) or {}
     print("[eleven_webhook] payload:", payload)
 
     caller = payload.get("caller") or payload.get("from") or payload.get("phone") or ""
-    agent  = payload.get("agent")  or payload.get("bot")   or ""
+    agent  = payload.get("agent")  or payload.get("bot")   or payload.get("agent_name") or ""
     started= payload.get("started_at") or ""
     ended  = payload.get("ended_at") or ""
     dur    = payload.get("duration_seconds") or payload.get("duration") or ""
@@ -734,8 +774,9 @@ def eleven_post_call():
             if "wav" in (mime or "") or first_audio.endswith(".wav"): ext = "wav"
             attachments.append({"filename": f"call_recording.{ext}", "content": data, "mime": mime or "audio/mpeg"})
 
-    # ===== NUEVO: destinatarios por BOT =====
-    recipients = _emails_for_bot(agent or "")
+    # === NUEVO: destinatarios por BOT ===
+    recipients = _bot_emails_for_event(payload)
+
     subj = f"[Post-Call] {agent or 'Agente'} – {caller or 'desconocido'}"
     _send_email(subj, "\n".join(lines), attachments, to_addrs=recipients)
 
@@ -749,19 +790,3 @@ def test_email():
         body_text="Esto es un correo de prueba desde /billing/webhooks/test-email.\nSi lo recibes, la configuración SMTP está OK."
     )
     return jsonify({"ok": bool(ok)})
-
-# ===== NUEVO: administrar correos de notificación por BOT via API =====
-@billing_bp.route("/notify-emails/<bot>", methods=["GET", "POST"])
-def notify_emails(bot):
-    bot = (bot or "").strip()
-    if not bot:
-        return jsonify({"success": False, "message": "bot requerido"}), 400
-
-    if request.method == "GET":
-        emails = _emails_for_bot(bot)
-        return jsonify({"success": True, "bot": bot, "emails": emails})
-
-    data = request.get_json(silent=True) or {}
-    emails = _listify_emails(data.get("emails"))
-    _notify_emails_ref(bot).set(emails)
-    return jsonify({"success": True, "bot": bot, "emails": emails})
