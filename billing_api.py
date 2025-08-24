@@ -598,7 +598,7 @@ def _download_file(url: str, timeout: int = 15):
         print("[download] ⚠️ Error descargando", url, e)
         return None, None
 
-# ========= NUEVO: Resolución ESTRICTA por número o slug (sin adivinar) =========
+# ====== NUEVO: Normalización y matching por número ======
 def _normalize_number(value: str):
     """
     Devuelve (proto, numE164) donde proto ∈ {'tel','whatsapp'} y numE164 comienza con '+'.
@@ -617,7 +617,7 @@ def _normalize_number(value: str):
     return (proto, v)
 
 def _extract_called_numbers(payload: dict):
-    """Extrae candidatos de 'número llamado' desde múltiples campos del payload."""
+    """Extrae candidatos de 'número llamado' desde múltiples campos del payload y devuelve E.164 sin protocolo."""
     nums = []
     data = payload.get("data") or {}
     meta = data.get("metadata") or {}
@@ -631,8 +631,8 @@ def _extract_called_numbers(payload: dict):
     v2 = (dyn.get("system__called_number") or "").strip()
     if v2: nums.append(v2)
 
-    # Campos planos comunes (por si vienen directo)
-    for key in ("to","To","twilio_to","agent_number","assistant_number","recipient_number"):
+    # Campos planos comunes
+    for key in ("to","To","twilio_to","agent_number","assistant_number","recipient_number","line","number"):
         vv = (payload.get(key) or "").strip()
         if vv: nums.append(vv)
 
@@ -642,37 +642,83 @@ def _extract_called_numbers(payload: dict):
             vv = (extra.get(key) or "").strip()
             if vv: nums.append(vv)
 
-    # Normalizados y únicos por número E.164 (ignorando protocolo)
-    seen = set()
-    out = []
+    # Normalizar y deduplicar por E.164
+    seen = set(); out = []
     for cand in nums:
         _, n = _normalize_number(cand)
         if n and n not in seen:
-            seen.add(n)
-            out.append(n)
+            seen.add(n); out.append(n)
     return out
 
+def _strings_in(obj):
+    """Itera TODAS las strings presentes en un dict/list anidados."""
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            yield from _strings_in(v)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            yield from _strings_in(v)
+
+_phone_re = re.compile(r'(?:whatsapp:)?\+?\d[\d\-\s\(\)]{7,}')
+
+def _all_e164_numbers_from_cfg(cfg: dict):
+    """
+    Busca teléfonos en el JSON del bot:
+    1) Prioriza claves típicas (twilio_number, whatsapp_number)
+    2) Si no existen, recorre el JSON y extrae cualquier teléfono plausible.
+    """
+    found = set()
+
+    for key in ("twilio_number","whatsapp_number","phone","business_phone"):
+        _, n = _normalize_number(str(cfg.get(key) or ""))
+        if n: found.add(n)
+
+    # Campos comunes anidados
+    for parent, key in (("contact","phone"), ("twilio","number"), ("whatsapp","number")):
+        o = cfg.get(parent) or {}
+        if isinstance(o, dict):
+            _, n = _normalize_number(str(o.get(key) or ""))
+            if n: found.add(n)
+
+    # Escaneo extensivo como respaldo
+    for s in _strings_in(cfg):
+        if len(s) > 1200:
+            continue  # evita prompts gigantes
+        for token in _phone_re.findall(s):
+            _, n = _normalize_number(token)
+            if n:
+                found.add(n)
+
+    return found
+
 def _match_bot_by_number_e164(bots: dict, num_e164: str):
-    """Busca un bot cuyo twilio_number o whatsapp_number coincida en E.164 (ignorando 'whatsapp:')."""
-    target = num_e164 or ""
-    if not target:
+    """Busca un bot cuyo twilio_number/whatsapp_number (o cualquier teléfono en su JSON) coincida en E.164."""
+    if not num_e164:
         return None
-    found = None
+
+    # 1) Preferir match en claves explícitas
     for cfg in bots.values():
         for key in ("twilio_number","whatsapp_number"):
             _, n2 = _normalize_number(cfg.get(key) or "")
-            if n2 and n2 == target:
-                if found and found is not cfg:
-                    print(f"[eleven_webhook] ⚠️ Duplicado de número {target} en configs. Usando la primera coincidencia.")
+            if n2 and n2 == num_e164:
                 return cfg
+
+    # 2) Respaldo: cualquier número presente en el JSON
+    for cfg in bots.values():
+        all_nums = _all_e164_numbers_from_cfg(cfg)
+        if num_e164 in all_nums:
+            return cfg
+
     return None
 
 def _resolve_bot_strict(payload: dict):
     """
     Estricto:
-    1) Intentar por número llamado (E.164) contra twilio_number/whatsapp_number
+    1) Intentar por número llamado (E.164) contra JSON (claves típicas y/o escaneo)
     2) Si no hay número, intentar por slug EXACTO
-    3) Si no se resuelve, devolver None (NO adivinar por nombre ni tomar el primero)
+    3) Si no se resuelve, devolver None (NO adivinar por nombre)
     """
     bots = load_bots_folder()
     if not bots:
@@ -692,6 +738,45 @@ def _resolve_bot_strict(payload: dict):
 
     # 3) sin resolución
     return None
+
+# ====== (Se mantiene la función original por compatibilidad, NO se usa para elegir bot) ======
+def _find_bot_cfg_for_payload(payload: dict) -> dict:
+    bots = load_bots_folder()
+    if not bots:
+        return {}
+    candidates = []
+    for key in ("bot_slug","agent_slug","bot","agent","agent_name","assistant","assistant_name",
+                "agent_number","twilio_to","to","line","number","assistant_number","recipient_number"):
+        v = (payload.get(key) or "").strip()
+        if v: candidates.append(v)
+    data = payload.get("data") or {}
+    meta = data.get("metadata") or {}
+    phone_call = meta.get("phone_call") or {}
+    if isinstance(phone_call, dict):
+        v = (phone_call.get("agent_number") or "").strip()
+        if v: candidates.append(v)
+    ci = data.get("conversation_initiation_client_data") or {}
+    dyn = ci.get("dynamic_variables") or {}
+    v = (dyn.get("system__called_number") or "").strip()
+    if v: candidates.append(v)
+    extra = payload.get("extra") or {}
+    if isinstance(extra, dict):
+        for key in ("bot","agent","agent_number","to","twilio_to","number","recipient_number"):
+            v = (extra.get(key) or "").strip()
+            if v: candidates.append(v)
+    for cand in candidates:
+        if cand in bots:
+            return bots[cand]
+    for cand in candidates:
+        for cfg in bots.values():
+            if str(cfg.get("name","")).strip().lower() == cand.strip().lower():
+                return cfg
+    to_v = (payload.get("to") or "").strip()
+    if to_v and to_v in bots:
+        return bots[to_v]
+    for cfg in bots.values():
+        return cfg
+    return {}
 
 # ====== Resolución de destinatarios por BOT ======
 def _extract_emails_from_cfg(cfg: dict) -> list:
@@ -766,14 +851,12 @@ def _render_transcript_blocks(transcript_list):
     return "\n".join(lines_txt), "\n".join(blocks_html)
 
 def _build_branded_email(agent_name, agent_phone, transcript_list):
-    # Texto plano (solo agente y número, luego conversación)
     header_txt = []
     if agent_name:  header_txt.append(f"Agente: {agent_name}")
     if agent_phone: header_txt.append(f"Número: {agent_phone}")
     conv_txt, _ = _render_transcript_blocks(transcript_list)
     text_plain = "\n".join(header_txt + ["", conv_txt])
 
-    # HTML (agente y número en DOS LÍNEAS)
     _, conv_blocks = _render_transcript_blocks(transcript_list)
     html = f"""
     <div style="background:{_BRAND_BG};padding:24px;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial;color:#e5e7eb;">
@@ -800,27 +883,24 @@ def eleven_post_call():
     data = payload.get("data") or {}
     transcript_list = data.get("transcript") or payload.get("transcript") or []
 
-    # Extrae números
-    nums_called = _extract_called_numbers(payload)  # lista de E.164 sin protocolo
-    agent_phone_number = nums_called[0] if nums_called else ""  # el primero detectado (llamado)
+    # NÚMERO LLAMADO (E.164)
+    nums_called = _extract_called_numbers(payload)
+    agent_phone_number = nums_called[0] if nums_called else ""
 
-    # === Resolución estricta: SOLO por número (o slug exacto si no hay número). Sin adivinar por nombre ni 'primero de la lista'.
+    # Resolución ESTRICTA
     cfg_guess = _resolve_bot_strict(payload)
 
-    # Construcción de nombre y número para el correo
     if cfg_guess:
         business_name = (cfg_guess.get("business_name") or
                          cfg_guess.get("name") or
-                         cfg_guess.get("slug") or
-                         "Agente")
+                         cfg_guess.get("slug") or "Agente")
         agent_name = business_name
-        # Mostrar el número real configurado en el bot, priorizando el matching
-        # Si el número que entró coincide con twilio_number o whatsapp_number, úsalo
+        # Mostrar el número real: si el payload trae uno, úsalo; sino, toma del JSON
         _, tw = _normalize_number(cfg_guess.get("twilio_number") or "")
         _, wa = _normalize_number(cfg_guess.get("whatsapp_number") or "")
         agent_number_display = agent_phone_number or wa or tw or ""
     else:
-        # Sin resolución: NO atribuimos a otra compañía. Lo marcamos como UNRESOLVED
+        # Sin resolución: NO atribuimos a otra empresa
         business_name = "UNRESOLVED"
         agent_name = "UNRESOLVED"
         agent_number_display = agent_phone_number or ""
@@ -849,14 +929,11 @@ def eleven_post_call():
                 "mime": mime or "audio/mpeg"
             })
 
-    # Destinatarios por BOT (si se resolvió). Si no, usa EMAIL_TO
     recipients = _bot_emails_for_event(payload, cfg_resuelto=cfg_guess)
     print("[eleven_webhook] Destinatarios:", recipients or "(vacío)")
 
-    # Render final
     text_plain, html_body = _build_branded_email(agent_name, agent_number_display, transcript_list)
 
-    # Asunto: BUSINESS NAME + número del cliente (si lo hay)
     caller_number = ( (data.get("metadata") or {}).get("phone_call") or {} ).get("external_number") \
                     or (payload.get("caller") or payload.get("from") or payload.get("phone") or (payload.get("call") or {}).get("from") or "")
     subj = f"[Post-Call] {business_name} – {caller_number or 'desconocido'}"
