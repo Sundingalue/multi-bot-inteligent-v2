@@ -111,6 +111,56 @@ def _service_item_ref(bot_name: str):
 def _openai_day_ref(bot_name: str, ymd: str):
     return db.reference(f"billing/openai/{bot_name}/{ymd}/aggregate")
 
+# ===== NUEVO: notify emails por bot =====
+def _notify_emails_ref(bot_name: str):
+    return db.reference(f"billing/notify_emails/{bot_name}")
+
+def _listify_emails(v):
+    if not v:
+        return []
+    if isinstance(v, list):
+        return [str(x).strip() for x in v if str(x).strip()]
+    if isinstance(v, str):
+        return [s.strip() for s in re.split(r"[,\n;]+", v) if s.strip()]
+    return []
+
+def _emails_for_bot(bot_name: str):
+    """Prioridad: Firebase -> bots/<slug>.json -> EMAIL_TO global."""
+    emails = []
+    # 1) Firebase (permite cambiar sin redeploy)
+    try:
+        v = _notify_emails_ref(bot_name).get()
+        emails = _listify_emails(v)
+    except Exception as e:
+        print(f"[billing_api] ⚠️ notify_emails Firebase {bot_name}: {e}")
+
+    # 2) Archivo bots/*.json
+    if not emails:
+        cfgs = load_bots_folder()
+        # match por name o slug
+        cfg = None
+        for c in cfgs.values():
+            n = (c.get("name") or c.get("slug") or "").strip()
+            if n.lower() == (bot_name or "").lower():
+                cfg = c
+                break
+        if cfg:
+            # notify.emails (lista o string)
+            if isinstance(cfg.get("notify"), dict):
+                emails = _listify_emails(cfg["notify"].get("emails"))
+            # fallback: emails (lista), contact.email (string)
+            if not emails:
+                emails = _listify_emails(cfg.get("emails"))
+            if not emails and isinstance(cfg.get("contact"), dict):
+                emails = _listify_emails(cfg["contact"].get("email"))
+
+    # 3) Fallback global
+    if not emails:
+        env = os.getenv("EMAIL_TO", "")
+        emails = _listify_emails(env)
+
+    return emails
+
 # =======================
 # ON/OFF
 # =======================
@@ -563,9 +613,6 @@ from email.message import EmailMessage
 from urllib.request import urlopen
 from urllib.error import URLError, HTTPError
 
-# === NUEVO: imports para verificación HMAC
-import hmac, hashlib
-
 def _smtp_settings():
     return {
         "host": os.getenv("SMTP_HOST", "").strip(),
@@ -576,19 +623,23 @@ def _smtp_settings():
         "to_addrs": [a.strip() for a in (os.getenv("EMAIL_TO", "").split(",") if os.getenv("EMAIL_TO") else []) if a.strip()],
     }
 
-def _send_email(subject: str, body_text: str, attachments: list = None):
-    """attachments: lista de dicts {"filename": str, "content": bytes, "mime": "audio/mpeg" ...}"""
+def _send_email(subject: str, body_text: str, attachments: list = None, to_addrs: list = None):
+    """attachments: lista de dicts {"filename": str, "content": bytes, "mime": "audio/mpeg" ...}
+       to_addrs: lista de destinatarios (si None, usa EMAIL_TO global)."""
     cfg = _smtp_settings()
-    if not (cfg["host"] and cfg["from_addr"] and cfg["to_addrs"]):
-        print("[email] ⚠️ SMTP no configurado (SMTP_HOST/PORT/USER/PASS, EMAIL_FROM, EMAIL_TO). Solo log.")
+    recipients = to_addrs if (to_addrs and len(to_addrs)) else cfg["to_addrs"]
+
+    if not (cfg["host"] and cfg["from_addr"] and recipients):
+        print("[email] ⚠️ SMTP no configurado (SMTP_HOST/PORT/USER/PASS, EMAIL_FROM o destinatarios). Solo log.")
         print("[email] Asunto:", subject)
+        print("[email] Para:", recipients or "(vacío)")
         print("[email] Texto:\n", body_text)
         return False
 
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = cfg["from_addr"]
-    msg["To"] = ", ".join(cfg["to_addrs"])
+    msg["To"] = ", ".join(recipients)
     msg.set_content(body_text)
 
     for att in (attachments or []):
@@ -606,7 +657,7 @@ def _send_email(subject: str, body_text: str, attachments: list = None):
             if cfg["user"]:
                 server.login(cfg["user"], cfg["password"])
             server.send_message(msg)
-        print("[email] ✉️ Enviado OK")
+        print("[email] ✉️ Enviado OK →", recipients)
         return True
     except Exception as e:
         print("[email] ❌ Error SMTP:", e)
@@ -622,49 +673,6 @@ def _download_file(url: str, timeout: int = 15):
         print("[download] ⚠️ Error descargando", url, e)
         return None, None
 
-# === NUEVO: helper para verificar la firma de ElevenLabs (HMAC-SHA256)
-def _verify_eleven_hmac(sig_header: str, raw_body: bytes) -> bool:
-    """
-    ElevenLabs envía un encabezado con la firma HMAC. El formato puede variar:
-      - solo el hex digest
-      - 'sha256=<hex>'
-      - 't=...,v1=<hex>'
-    Comparamos de manera constante contra el digest calculado.
-    """
-    secret = (os.getenv("ELEVEN_WEBHOOK_SECRET") or "").encode("utf-8")
-    if not secret:
-        print("[eleven_webhook] ⚠️ ELEVEN_WEBHOOK_SECRET no configurado. Se acepta SIN verificar.")
-        return True  # si no hay secreto, permitimos para no bloquear en pruebas
-
-    if not sig_header:
-        print("[eleven_webhook] ❌ Falta encabezado de firma")
-        return False
-
-    # firma calculada
-    calc_hex = hmac.new(secret, raw_body or b"", hashlib.sha256).hexdigest()
-
-    # normalizar lo que llegó
-    header = sig_header.strip()
-    candidates = set()
-
-    # caso directo
-    candidates.add(header)
-    # posible prefijo
-    if header.startswith("sha256="):
-        candidates.add(header.split("=", 1)[1].strip())
-
-    # posible lista tipo "t=...,v1=xxxx"
-    if "," in header and "=" in header:
-        parts = [p.strip() for p in header.split(",")]
-        for p in parts:
-            if p.startswith("v1="):
-                candidates.add(p.split("=", 1)[1].strip())
-
-    ok = any(hmac.compare_digest(calc_hex, c) for c in candidates)
-    if not ok:
-        print("[eleven_webhook] ❌ Firma inválida. header=", header, " calc=", calc_hex)
-    return ok
-
 @billing_bp.route("/webhooks/eleven/post-call", methods=["POST"])
 def eleven_post_call():
     """
@@ -678,14 +686,6 @@ def eleven_post_call():
       - agent / bot (nombre)
       - extra: { name, lastname, email, ... }
     """
-
-    # === NUEVO: verificación HMAC antes de procesar ===
-    raw = request.get_data(cache=False, as_text=False)
-    sig = request.headers.get("ElevenLabs-Signature") or request.headers.get("X-ElevenLabs-Signature") or ""
-    if not _verify_eleven_hmac(sig, raw):
-        return jsonify({"ok": False, "error": "invalid_signature"}), 401
-
-    # ahora sí, parseamos el JSON
     payload = request.get_json(silent=True) or {}
     print("[eleven_webhook] payload:", payload)
 
@@ -734,8 +734,10 @@ def eleven_post_call():
             if "wav" in (mime or "") or first_audio.endswith(".wav"): ext = "wav"
             attachments.append({"filename": f"call_recording.{ext}", "content": data, "mime": mime or "audio/mpeg"})
 
+    # ===== NUEVO: destinatarios por BOT =====
+    recipients = _emails_for_bot(agent or "")
     subj = f"[Post-Call] {agent or 'Agente'} – {caller or 'desconocido'}"
-    _send_email(subj, "\n".join(lines), attachments)
+    _send_email(subj, "\n".join(lines), attachments, to_addrs=recipients)
 
     return jsonify({"ok": True})
 
@@ -747,3 +749,19 @@ def test_email():
         body_text="Esto es un correo de prueba desde /billing/webhooks/test-email.\nSi lo recibes, la configuración SMTP está OK."
     )
     return jsonify({"ok": bool(ok)})
+
+# ===== NUEVO: administrar correos de notificación por BOT via API =====
+@billing_bp.route("/notify-emails/<bot>", methods=["GET", "POST"])
+def notify_emails(bot):
+    bot = (bot or "").strip()
+    if not bot:
+        return jsonify({"success": False, "message": "bot requerido"}), 400
+
+    if request.method == "GET":
+        emails = _emails_for_bot(bot)
+        return jsonify({"success": True, "bot": bot, "emails": emails})
+
+    data = request.get_json(silent=True) or {}
+    emails = _listify_emails(data.get("emails"))
+    _notify_emails_ref(bot).set(emails)
+    return jsonify({"success": True, "bot": bot, "emails": emails})
