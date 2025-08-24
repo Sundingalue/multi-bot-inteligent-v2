@@ -141,7 +141,7 @@ def _set_status(bot_name: str, state: str):
         return False
 
 # =======================
-# OpenAI usage
+# OpenAI usage (aggregate y serie)
 # =======================
 def record_openai_usage(bot: str, model: str, input_tokens: int, output_tokens: int):
     if not bot:
@@ -212,7 +212,7 @@ def _sum_openai(bot: str, d1: str, d2: str):
     }
 
 # =======================
-# Twilio usage
+# Twilio usage (aggregate y serie)
 # =======================
 def _twilio_client():
     sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
@@ -564,3 +564,302 @@ def _send_email(subject: str, body_text: str, attachments: list = None, to_addrs
     msg["From"] = cfg["from_addr"]
     msg["To"] = ", ".join(final_to)
     msg.set_content(body_text or "(ver versión HTML)")
+    if html_body:
+        msg.add_alternative(html_body, subtype="html")
+
+    for att in (attachments or []):
+        try:
+            msg.add_attachment(att["content"], maintype=(att.get("mime","application/octet-stream").split("/")[0]),
+                               subtype=(att.get("mime","application/octet-stream").split("/")[1]),
+                               filename=att.get("filename","file.bin"))
+        except Exception as e:
+            print(f"[email] ⚠️ No se pudo adjuntar {att.get('filename')}: {e}")
+
+    context = ssl.create_default_context()
+    try:
+        with smtplib.SMTP(cfg["host"], cfg["port"]) as server:
+            server.starttls(context=context)
+            if cfg["user"]:
+                server.login(cfg["user"], cfg["password"])
+            server.send_message(msg)
+        print("[email] ✉️ Enviado OK a:", final_to)
+        return True
+    except Exception as e:
+        print("[email] ❌ Error SMTP:", e)
+        return False
+
+def _download_file(url: str, timeout: int = 15):
+    try:
+        with urlopen(url, timeout=timeout) as r:
+            data = r.read()
+            ct = r.info().get_content_type() or "application/octet-stream"
+            return data, ct
+    except (URLError, HTTPError) as e:
+        print("[download] ⚠️ Error descargando", url, e)
+        return None, None
+
+# ====== Resolución de destinatarios por BOT ======
+def _extract_emails_from_cfg(cfg: dict) -> list:
+    emails = []
+    notify = cfg.get("notify") or {}
+    if isinstance(notify, dict):
+        arr = notify.get("emails")
+        if isinstance(arr, list):
+            emails.extend([e for e in arr if isinstance(e, str) and e.strip()])
+    if not emails:
+        arr2 = cfg.get("emails")
+        if isinstance(arr2, list):
+            emails.extend([e for e in arr2 if isinstance(e, str) and e.strip()])
+    if not emails:
+        contact = cfg.get("contact") or {}
+        if isinstance(contact, dict):
+            ce = contact.get("email")
+            if isinstance(ce, str) and ce.strip():
+                emails.append(ce.strip())
+    return [e.strip() for e in emails if e and isinstance(e, str)]
+
+def _find_bot_cfg_for_payload(payload: dict) -> dict:
+    """
+    Intenta identificar el bot a partir de varios campos:
+    - data.metadata.phone_call.agent_number (Número del bot en la llamada)
+    - system__called_number (dynamic_variables)
+    - to / agent_number / whatsapp_number / twilio_number
+    - slug, name
+    """
+    bots = load_bots_folder()
+    if not bots:
+        return {}
+
+    candidates = []
+
+    # Campos planos comunes
+    for key in ("bot_slug","agent_slug","bot","agent","agent_name","assistant","assistant_name",
+                "agent_number","twilio_to","to","line","number","assistant_number","recipient_number"):
+        v = (payload.get(key) or "").strip()
+        if v: candidates.append(v)
+
+    # Estructura ElevenLabs -> data.metadata.phone_call.agent_number
+    data = payload.get("data") or {}
+    meta = data.get("metadata") or {}
+    phone_call = meta.get("phone_call") or {}
+    if isinstance(phone_call, dict):
+        v = (phone_call.get("agent_number") or "").strip()
+        if v: candidates.append(v)
+
+    # ElevenLabs -> dynamic_variables.system__called_number
+    ci = data.get("conversation_initiation_client_data") or {}
+    dyn = ci.get("dynamic_variables") or {}
+    v = (dyn.get("system__called_number") or "").strip()
+    if v: candidates.append(v)
+
+    # También dentro de "extra"
+    extra = payload.get("extra") or {}
+    if isinstance(extra, dict):
+        for key in ("bot","agent","agent_number","to","twilio_to","number","recipient_number"):
+            v = (extra.get(key) or "").strip()
+            if v: candidates.append(v)
+
+    # 1) Coincidencia exacta de slug
+    for cand in candidates:
+        if cand in bots:
+            return bots[cand]
+
+    # 2) Nombre
+    for cand in candidates:
+        for cfg in bots.values():
+            if str(cfg.get("name","")).strip().lower() == cand.strip().lower():
+                return cfg
+
+    # 3) Coincidencia por número (twilio/whatsapp)
+    for cand in candidates:
+        c = cand.strip().lower()
+        for cfg in bots.values():
+            if str(cfg.get("twilio_number","")).strip().lower() == c:
+                return cfg
+            if str(cfg.get("whatsapp_number","")).strip().lower() == c:
+                return cfg
+
+    # 4) Fallback: 'to' como slug
+    to_v = (payload.get("to") or "").strip()
+    if to_v and to_v in bots:
+        return bots[to_v]
+
+    # 5) Último recurso: primero
+    for cfg in bots.values():
+        return cfg
+    return {}
+
+def _bot_emails_for_event(payload: dict) -> list:
+    cfg = _find_bot_cfg_for_payload(payload)
+    emails = _extract_emails_from_cfg(cfg) if cfg else []
+    if emails:
+        return emails
+    env_to = [a.strip() for a in (os.getenv("EMAIL_TO","").split(",") if os.getenv("EMAIL_TO") else []) if a.strip()]
+    return env_to
+
+# ====== Verificación opcional de firma HMAC de Eleven ======
+def _verify_eleven_signature(req) -> bool:
+    secret = os.getenv("ELEVEN_WEBHOOK_SECRET", "").strip()
+    if not secret:
+        return True
+    sig = req.headers.get("ElevenLabs-Signature") or req.headers.get("X-ElevenLabs-Signature") or ""
+    if not sig:
+        print("[eleven_webhook] ⚠️ Falta header de firma.")
+        return True
+    body = req.get_data() or b""
+    digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    ok = hmac.compare_digest(sig.strip(), digest.strip()) or hmac.compare_digest(sig.replace("sha256=","").strip(), digest.strip())
+    if not ok:
+        print("[eleven_webhook] ⚠️ Firma HMAC no coincide. Header:", sig, " Calculada:", digest)
+    return True
+
+# ====== Render bonito de conversación (HTML + texto)
+_BRAND_BG = "#0b1220"
+_BRAND_ACCENT = "#f59e0b"
+_BADGE_AGENT = "#0ea5e9"
+_BADGE_USER  = "#22c55e"
+
+def _escape_html(s: str) -> str:
+    return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+
+def _render_transcript_blocks(transcript_list):
+    lines_txt = []
+    blocks_html = []
+    for item in (transcript_list or []):
+        role = (item.get("role") or "").lower()
+        msg  = (item.get("message") or "").strip()
+        if not msg:
+            continue
+        who = "Agente" if role == "agent" else "Cliente"
+        badge_color = _BADGE_AGENT if role == "agent" else _BADGE_USER
+        lines_txt.append(f"{who}: {msg}")
+        blocks_html.append(f"""
+          <div style="margin:10px 0;padding:12px 14px;background:#111827;border:1px solid #1f2937;border-radius:12px;">
+            <span style="display:inline-block;background:{badge_color};color:#0b1220;font-weight:700;font-size:12px;padding:2px 8px;border-radius:999px;margin-bottom:8px">{who}</span>
+            <div style="color:#e5e7eb;line-height:1.5;font-size:15px;">{_escape_html(msg)}</div>
+          </div>
+        """)
+    return "\n".join(lines_txt), "\n".join(blocks_html)
+
+def _build_branded_email(agent_name, agent_phone, transcript_list):
+    # Texto plano (solo agente y número, luego conversación)
+    header_txt = []
+    if agent_name:  header_txt.append(f"Agente: {agent_name}")
+    if agent_phone: header_txt.append(f"Número: {agent_phone}")
+    conv_txt, _ = _render_transcript_blocks(transcript_list)
+    text_plain = "\n".join(header_txt + ["", conv_txt])
+
+    # HTML (agente y número en DOS LÍNEAS)
+    _, conv_blocks = _render_transcript_blocks(transcript_list)
+    html = f"""
+    <div style="background:{_BRAND_BG};padding:24px;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial;color:#e5e7eb;">
+      <div style="max-width:760px;margin:0 auto;">
+        <div style="font-weight:800;font-size:18px;color:{_BRAND_ACCENT};letter-spacing:.5px;margin-bottom:10px">IN HOUSTON TEXAS</div>
+        <div style="background:#0f172a;border:1px solid #1f2937;border-radius:14px;padding:16px 18px;margin-bottom:14px">
+          <p style="margin:0 0 6px 0"><b>Agente/Bot:</b> {_escape_html(agent_name or '—')}</p>
+          <p style="margin:0"><b>Número:</b> {_escape_html(agent_phone or '—')}</p>
+        </div>
+        {conv_blocks or '<div style="color:#9ca3af">No hay mensajes.</div>'}
+      </div>
+    </div>
+    """
+    return text_plain, html
+
+# ====== Webhook principal ======
+@billing_bp.route("/webhooks/eleven/post-call", methods=["POST"])
+def eleven_post_call():
+    _verify_eleven_signature(request)
+
+    payload = request.get_json(silent=True) or {}
+    print("[eleven_webhook] payload:", payload)
+
+    data = payload.get("data") or {}
+    transcript_list = data.get("transcript") or payload.get("transcript") or []
+
+    # Números desde metadata (preferido para identificar bot correcto)
+    meta = data.get("metadata") or {}
+    phone_call = meta.get("phone_call") or {}
+    agent_phone_number = (phone_call.get("agent_number") or "").strip()  # número del bot en la llamada
+    caller_number = (phone_call.get("external_number") or
+                     payload.get("caller") or payload.get("from") or payload.get("phone") or
+                     (payload.get("call") or {}).get("from") or "").strip()
+
+    # Bot detectado por número/slug/nombre
+    cfg_guess = _find_bot_cfg_for_payload(payload)
+    # Si el número del agente viene en metadata, intenta casar exactamente por número
+    if agent_phone_number:
+        bots = load_bots_folder()
+        for cfg in bots.values():
+            nums = [str(cfg.get("whatsapp_number","")).strip().lower(),
+                    str(cfg.get("twilio_number","")).strip().lower()]
+            if agent_phone_number.strip().lower() in nums:
+                cfg_guess = cfg
+                break
+
+    # Nombre del agente: prioriza el del bot detectado
+    agent_name = (
+        (cfg_guess.get("name") if cfg_guess else None) or
+        payload.get("agent") or payload.get("bot") or payload.get("agent_name") or
+        (payload.get("call") or {}).get("agent") or
+        data.get("agent_name") or
+        _first_bot_name() or
+        "Agente"
+    )
+
+    # Número del agente a mostrar: metadata → bot cfg
+    agent_number_display = agent_phone_number or (
+        (cfg_guess.get("whatsapp_number") if cfg_guess else None) or
+        (cfg_guess.get("twilio_number") if cfg_guess else None) or
+        ""
+    )
+
+    # Adjuntos: primer audio (opcional)
+    recs = payload.get("recordings") or payload.get("recording_urls") or data.get("recordings") or []
+    if isinstance(recs, str):
+        recs = [recs]
+    attachments = []
+    first_audio = None
+    if isinstance(recs, list) and recs:
+        first = recs[0]
+        if isinstance(first, dict):
+            first_audio = first.get("url") or first.get("href")
+        elif isinstance(first, str):
+            first_audio = first
+    if first_audio:
+        data_bytes, mime = _download_file(first_audio)
+        if data_bytes:
+            ext = "mp3"
+            if "wav" in (mime or "") or str(first_audio).endswith(".wav"):
+                ext = "wav"
+            attachments.append({
+                "filename": f"call_recording.{ext}",
+                "content": data_bytes,
+                "mime": mime or "audio/mpeg"
+            })
+
+    # Destinatarios por BOT
+    recipients = _bot_emails_for_event(payload)
+    print("[eleven_webhook] Destinatarios:", recipients or "(vacío)")
+
+    # Render final
+    text_plain, html_body = _build_branded_email(agent_name, agent_number_display, transcript_list)
+
+    # Asunto: nombre del agente + número del cliente (si lo hay)
+    subj = f"[Post-Call] {agent_name} – {caller_number or 'desconocido'}"
+
+    _send_email(subj, text_plain, attachments, to_addrs=recipients, html_body=html_body)
+    return jsonify({"ok": True})
+
+@billing_bp.route("/webhooks/test-email", methods=["GET"])
+def test_email():
+    ok = _send_email(
+        subject="Prueba INH Billing – SMTP",
+        body_text="Esto es un correo de prueba desde /billing/webhooks/test-email.\nSi lo recibes, la configuración SMTP está OK.",
+        html_body="""
+        <div style="font-family:system-ui;padding:16px">
+          <h2>Prueba INH Billing – SMTP</h2>
+          <p>Si ves este correo, la configuración SMTP funciona.</p>
+        </div>
+        """
+    )
+    return jsonify({"ok": bool(ok)})
