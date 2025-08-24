@@ -8,6 +8,7 @@
 from flask import Blueprint, request, jsonify
 from datetime import datetime, timedelta
 import os, json, glob, re
+import hmac, hashlib  # <-- NUEVO (firma opcional)
 
 from firebase_admin import db
 from twilio.rest import Client as TwilioClient
@@ -556,7 +557,7 @@ def track_openai():
 # (La página HTML /panel se queda igual que ya tenías)
 
 # =======================
-# === NUEVO: Webhook ElevenLabs + Email opcional ===
+# === Webhook ElevenLabs + Email opcional ===
 # =======================
 import smtplib, ssl
 from email.message import EmailMessage
@@ -622,7 +623,7 @@ def _download_file(url: str, timeout: int = 15):
         print("[download] ⚠️ Error descargando", url, e)
         return None, None
 
-# ====== NUEVO: Resolución de destinatarios por BOT ======
+# ====== Resolución de destinatarios por BOT ======
 def _extract_emails_from_cfg(cfg: dict) -> list:
     """Devuelve lista de correos en orden de prioridad:
        notify.emails -> emails -> contact.email"""
@@ -649,7 +650,6 @@ def _extract_emails_from_cfg(cfg: dict) -> list:
             if isinstance(ce, str) and ce.strip():
                 emails.append(ce.strip())
 
-    # Normaliza espacios
     return [e.strip() for e in emails if e and isinstance(e, str)]
 
 def _find_bot_cfg_for_payload(payload: dict) -> dict:
@@ -658,36 +658,32 @@ def _find_bot_cfg_for_payload(payload: dict) -> dict:
     if not bots:
         return {}
 
-    # Posibles llaves en el payload
     candidates = []
-    # nombres/identificadores comunes
     for key in ("bot_slug","agent_slug","bot","agent","agent_name","assistant","assistant_name"):
         v = (payload.get(key) or "").strip()
         if v: candidates.append(v)
-    # números/líneas
-    for key in ("agent_number","twilio_to","to","line","number","assistant_number"):
+    for key in ("agent_number","twilio_to","to","line","number","assistant_number","recipient_number"):
         v = (payload.get(key) or "").strip()
         if v: candidates.append(v)
 
-    # También busca dentro de "extra"
     extra = payload.get("extra") or {}
     if isinstance(extra, dict):
-        for key in ("bot","agent","agent_number","to","twilio_to","number"):
+        for key in ("bot","agent","agent_number","to","twilio_to","number","recipient_number"):
             v = (extra.get(key) or "").strip()
             if v: candidates.append(v)
 
-    # 1) Coincidencia exacta de slug
+    # 1) slug exacto
     for cand in candidates:
         if cand in bots:
             return bots[cand]
 
-    # 2) Coincidencia por nombre
+    # 2) nombre
     for cand in candidates:
         for cfg in bots.values():
             if str(cfg.get("name","")).strip().lower() == cand.strip().lower():
                 return cfg
 
-    # 3) Coincidencia por número (twilio_number / whatsapp_number)
+    # 3) número
     for cand in candidates:
         c = cand.strip().lower()
         for cfg in bots.values():
@@ -696,7 +692,7 @@ def _find_bot_cfg_for_payload(payload: dict) -> dict:
             if str(cfg.get("whatsapp_number","")).strip().lower() == c:
                 return cfg
 
-    # 4) Último intento: si payload tiene 'to' con formato whatsapp:+E164 y hay un bot con ese slug
+    # 4) 'to' con formato que coincida con slug
     to_v = (payload.get("to") or "").strip()
     if to_v and to_v in bots:
         return bots[to_v]
@@ -709,9 +705,25 @@ def _bot_emails_for_event(payload: dict) -> list:
     emails = _extract_emails_from_cfg(cfg) if cfg else []
     if emails:
         return emails
-    # fallback: EMAIL_TO global
     env_to = [a.strip() for a in (os.getenv("EMAIL_TO","").split(",") if os.getenv("EMAIL_TO") else []) if a.strip()]
     return env_to
+
+# ====== Verificación opcional de firma HMAC de Eleven ======
+def _verify_eleven_signature(req) -> bool:
+    secret = os.getenv("ELEVEN_WEBHOOK_SECRET", "").strip()
+    if not secret:
+        return True  # no forzamos si no está configurado
+    sig = req.headers.get("ElevenLabs-Signature") or req.headers.get("X-ElevenLabs-Signature") or ""
+    if not sig:
+        print("[eleven_webhook] ⚠️ Falta header de firma. Se continúa por compatibilidad.")
+        return True
+    # Eleven suele firmar con HMAC-SHA256 del cuerpo; comparamos el hexdigest
+    body = req.get_data() or b""
+    digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    ok = hmac.compare_digest(sig.strip(), digest.strip()) or hmac.compare_digest(sig.replace("sha256=","").strip(), digest.strip())
+    if not ok:
+        print("[eleven_webhook] ⚠️ Firma HMAC no coincide. Header:", sig, " Calculada:", digest)
+    return True  # dejamos pasar pero lo registramos (cámbialo a 'ok' si quieres bloquear)
 
 @billing_bp.route("/webhooks/eleven/post-call", methods=["POST"])
 def eleven_post_call():
@@ -726,31 +738,56 @@ def eleven_post_call():
       - agent / bot (nombre o slug)
       - extra: { name, lastname, email, ... }
     """
+    _verify_eleven_signature(request)  # no bloquea, solo avisa si no coincide
+
     payload = request.get_json(silent=True) or {}
     print("[eleven_webhook] payload:", payload)
 
-    caller = payload.get("caller") or payload.get("from") or payload.get("phone") or ""
-    agent  = payload.get("agent")  or payload.get("bot")   or payload.get("agent_name") or ""
-    started= payload.get("started_at") or ""
-    ended  = payload.get("ended_at") or ""
-    dur    = payload.get("duration_seconds") or payload.get("duration") or ""
-    trans  = payload.get("transcript") or ""
-    summ   = payload.get("summary") or ""
-    extra  = payload.get("extra") or {}
-    recs   = payload.get("recordings") or payload.get("recording_urls") or []
+    # Fallbacks robustos para campos comunes
+    caller = (
+        payload.get("caller") or payload.get("from") or payload.get("phone") or
+        (payload.get("call") or {}).get("from") or ""
+    )
+    agent  = (
+        payload.get("agent")  or payload.get("bot") or payload.get("agent_name") or
+        (payload.get("call") or {}).get("agent") or ""
+    )
+    started= payload.get("started_at") or (payload.get("call") or {}).get("started_at") or ""
+    ended  = payload.get("ended_at")   or (payload.get("call") or {}).get("ended_at") or ""
+    dur    = (
+        payload.get("duration_seconds") or payload.get("duration") or
+        (payload.get("call") or {}).get("duration_seconds") or ""
+    )
+    trans  = payload.get("transcript") or (payload.get("call") or {}).get("transcript") or ""
+    summ   = payload.get("summary")    or (payload.get("call") or {}).get("summary") or ""
+    extra  = payload.get("extra") or payload.get("contact") or {}
 
-    # Construir cuerpo de email
+    # Si no traen 'agent', lo resolvemos por el bot del payload/carpeta
+    if not agent:
+        cfg_guess = _find_bot_cfg_for_payload(payload)
+        if cfg_guess:
+            agent = cfg_guess.get("name") or cfg_guess.get("slug") or "Agente"
+
+    recs   = payload.get("recordings") or payload.get("recording_urls") or []
+    # normaliza recordings si vienen como string
+    if isinstance(recs, str):
+        recs = [recs]
+
+    # Construir cuerpo de email (con fallback al JSON crudo)
     lines = []
-    if agent:  lines.append(f"Agente/Bot: {agent}")
-    if caller: lines.append(f"Llamada de: {caller}")
-    if started or ended: lines.append(f"Inicio: {started}  |  Fin: {ended}")
-    if dur:     lines.append(f"Duración (s): {dur}")
-    if extra and isinstance(extra, dict):
-        if any(k in extra for k in ("name","lastname","email")):
-            lines.append("— Datos capturados —")
-            if extra.get("name"):     lines.append(f"Nombre: {extra.get('name')}")
-            if extra.get("lastname"): lines.append(f"Apellido: {extra.get('lastname')}")
-            if extra.get("email"):    lines.append(f"Email: {extra.get('email')}")
+    lines.append(f"Agente/Bot: {agent or 'Agente'}")
+    lines.append(f"Llamada de: {caller or 'desconocido'}")
+    if started or ended:
+        lines.append(f"Inicio: {started or '-'}  |  Fin: {ended or '-'}")
+    if dur:
+        lines.append(f"Duración (s): {dur}")
+
+    if isinstance(extra, dict) and any(k in extra for k in ("name","lastname","email")):
+        lines.append("— Datos capturados —")
+        if extra.get("name"):     lines.append(f"Nombre: {extra.get('name')}")
+        if extra.get("lastname"): lines.append(f"Apellido: {extra.get('lastname')}")
+        if extra.get("email"):    lines.append(f"Email: {extra.get('email')}")
+
     if summ:
         lines.append("\n== Resumen ==")
         lines.append(str(summ))
@@ -758,24 +795,40 @@ def eleven_post_call():
         lines.append("\n== Transcripción ==")
         lines.append(str(trans))
 
+    # Si todo vino vacío, mete el JSON crudo para depurar
+    if len("\n".join(lines).strip()) == 0 or (not trans and not summ and not caller and not agent):
+        lines.append("\n== Payload recibido ==")
+        try:
+            lines.append(json.dumps(payload, ensure_ascii=False, indent=2))
+        except Exception:
+            lines.append(str(payload))
+
     # Adjuntar primer audio si hay
     attachments = []
     first_audio = None
     if isinstance(recs, list) and recs:
         first = recs[0]
         if isinstance(first, dict):
-            first_audio = first.get("url")
+            first_audio = first.get("url") or first.get("href")
         elif isinstance(first, str):
             first_audio = first
     if first_audio:
         data, mime = _download_file(first_audio)
         if data:
             ext = "mp3"
-            if "wav" in (mime or "") or first_audio.endswith(".wav"): ext = "wav"
-            attachments.append({"filename": f"call_recording.{ext}", "content": data, "mime": mime or "audio/mpeg"})
+            if "wav" in (mime or "") or first_audio.endswith(".wav"):
+                ext = "wav"
+            attachments.append({
+                "filename": f"call_recording.{ext}",
+                "content": data,
+                "mime": mime or "audio/mpeg"
+            })
+        else:
+            lines.append(f"\n(No se pudo descargar grabación: {first_audio})")
 
-    # === NUEVO: destinatarios por BOT ===
+    # Destinatarios por BOT
     recipients = _bot_emails_for_event(payload)
+    print("[eleven_webhook] Destinatarios resueltos:", recipients or "(vacío)")
 
     subj = f"[Post-Call] {agent or 'Agente'} – {caller or 'desconocido'}"
     _send_email(subj, "\n".join(lines), attachments, to_addrs=recipients)
