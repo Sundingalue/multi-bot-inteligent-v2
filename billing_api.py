@@ -554,3 +554,142 @@ def track_openai():
     return jsonify({"success": True})
 
 # (La página HTML /panel se queda igual que ya tenías)
+
+# =======================
+# === NUEVO: Webhook ElevenLabs + Email opcional ===
+# =======================
+import smtplib, ssl
+from email.message import EmailMessage
+from urllib.request import urlopen
+from urllib.error import URLError, HTTPError
+
+def _smtp_settings():
+    return {
+        "host": os.getenv("SMTP_HOST", "").strip(),
+        "port": int(os.getenv("SMTP_PORT", "587").strip() or "587"),
+        "user": os.getenv("SMTP_USER", "").strip(),
+        "password": os.getenv("SMTP_PASS", "").strip(),
+        "from_addr": os.getenv("EMAIL_FROM", "").strip() or os.getenv("SMTP_USER", "").strip(),
+        "to_addrs": [a.strip() for a in (os.getenv("EMAIL_TO", "").split(",") if os.getenv("EMAIL_TO") else []) if a.strip()],
+    }
+
+def _send_email(subject: str, body_text: str, attachments: list = None):
+    """attachments: lista de dicts {"filename": str, "content": bytes, "mime": "audio/mpeg" ...}"""
+    cfg = _smtp_settings()
+    if not (cfg["host"] and cfg["from_addr"] and cfg["to_addrs"]):
+        print("[email] ⚠️ SMTP no configurado (SMTP_HOST/PORT/USER/PASS, EMAIL_FROM, EMAIL_TO). Solo log.")
+        print("[email] Asunto:", subject)
+        print("[email] Texto:\n", body_text)
+        return False
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = cfg["from_addr"]
+    msg["To"] = ", ".join(cfg["to_addrs"])
+    msg.set_content(body_text)
+
+    for att in (attachments or []):
+        try:
+            msg.add_attachment(att["content"], maintype=(att.get("mime","application/octet-stream").split("/")[0]),
+                               subtype=(att.get("mime","application/octet-stream").split("/")[1]),
+                               filename=att.get("filename","file.bin"))
+        except Exception as e:
+            print(f"[email] ⚠️ No se pudo adjuntar {att.get('filename')}: {e}")
+
+    context = ssl.create_default_context()
+    try:
+        with smtplib.SMTP(cfg["host"], cfg["port"]) as server:
+            server.starttls(context=context)
+            if cfg["user"]:
+                server.login(cfg["user"], cfg["password"])
+            server.send_message(msg)
+        print("[email] ✉️ Enviado OK")
+        return True
+    except Exception as e:
+        print("[email] ❌ Error SMTP:", e)
+        return False
+
+def _download_file(url: str, timeout: int = 15):
+    try:
+        with urlopen(url, timeout=timeout) as r:
+            data = r.read()
+            ct = r.info().get_content_type() or "application/octet-stream"
+            return data, ct
+    except (URLError, HTTPError) as e:
+        print("[download] ⚠️ Error descargando", url, e)
+        return None, None
+
+@billing_bp.route("/webhooks/eleven/post-call", methods=["POST"])
+def eleven_post_call():
+    """
+    Webhook genérico para ElevenLabs Post-Call.
+    Espera un JSON con (ejemplos):
+      - caller / phone / from
+      - started_at / ended_at / duration_seconds
+      - transcript (texto)
+      - summary (opcional)
+      - recordings: [ { "url": "...", "format": "mp3" }, ... ]
+      - agent / bot (nombre)
+      - extra: { name, lastname, email, ... }
+    """
+    payload = request.get_json(silent=True) or {}
+    print("[eleven_webhook] payload:", payload)
+
+    caller = payload.get("caller") or payload.get("from") or payload.get("phone") or ""
+    agent  = payload.get("agent")  or payload.get("bot")   or ""
+    started= payload.get("started_at") or ""
+    ended  = payload.get("ended_at") or ""
+    dur    = payload.get("duration_seconds") or payload.get("duration") or ""
+    trans  = payload.get("transcript") or ""
+    summ   = payload.get("summary") or ""
+    extra  = payload.get("extra") or {}
+    recs   = payload.get("recordings") or payload.get("recording_urls") or []
+
+    # Construir cuerpo de email
+    lines = []
+    if agent:  lines.append(f"Agente/Bot: {agent}")
+    if caller: lines.append(f"Llamada de: {caller}")
+    if started or ended: lines.append(f"Inicio: {started}  |  Fin: {ended}")
+    if dur:     lines.append(f"Duración (s): {dur}")
+    if extra and isinstance(extra, dict):
+        if any(k in extra for k in ("name","lastname","email")):
+            lines.append("— Datos capturados —")
+            if extra.get("name"):     lines.append(f"Nombre: {extra.get('name')}")
+            if extra.get("lastname"): lines.append(f"Apellido: {extra.get('lastname')}")
+            if extra.get("email"):    lines.append(f"Email: {extra.get('email')}")
+    if summ:
+        lines.append("\n== Resumen ==")
+        lines.append(str(summ))
+    if trans:
+        lines.append("\n== Transcripción ==")
+        lines.append(str(trans))
+
+    # Adjuntar primer audio si hay
+    attachments = []
+    first_audio = None
+    if isinstance(recs, list) and recs:
+        first = recs[0]
+        if isinstance(first, dict):
+            first_audio = first.get("url")
+        elif isinstance(first, str):
+            first_audio = first
+    if first_audio:
+        data, mime = _download_file(first_audio)
+        if data:
+            ext = "mp3"
+            if "wav" in (mime or "") or first_audio.endswith(".wav"): ext = "wav"
+            attachments.append({"filename": f"call_recording.{ext}", "content": data, "mime": mime or "audio/mpeg"})
+
+    subj = f"[Post-Call] {agent or 'Agente'} – {caller or 'desconocido'}"
+    _send_email(subj, "\n".join(lines), attachments)
+
+    return jsonify({"ok": True})
+
+@billing_bp.route("/webhooks/test-email", methods=["GET"])
+def test_email():
+    """Envía un email de prueba usando las variables SMTP_*/EMAIL_* del entorno."""
+    ok = _send_email(
+        subject="Prueba INH Billing – SMTP",
+        body_text="Esto es un correo de prueba desde /billing/webhooks/test-email.\nSi lo recibes, la configuración SMTP está OK."
+    )
+    return jsonify({"ok": bool(ok)})
