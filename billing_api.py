@@ -8,7 +8,7 @@
 from flask import Blueprint, request, jsonify
 from datetime import datetime, timedelta
 import os, json, glob, re
-import hmac, hashlib  # <-- NUEVO (firma opcional)
+import hmac, hashlib
 
 from firebase_admin import db
 from twilio.rest import Client as TwilioClient
@@ -72,9 +72,6 @@ def load_bots_folder():
         try:
             data = _read_json(path)
             if isinstance(data, dict):
-                # Admite dos formatos:
-                # 1) {"slug":{"...config..."}}
-                # 2) {"slug":"...", "name":"...", ...}
                 if "slug" in data:
                     bots[data["slug"]] = data
                 else:
@@ -92,6 +89,15 @@ def _normalize_bot_name(bots_config: dict, name: str):
     for cfg in bots_config.values():
         if isinstance(cfg, dict) and cfg.get("name", "").lower() == str(name).lower():
             return cfg.get("name")
+    return None
+
+def _first_bot_name():
+    bots = load_bots_folder()
+    if not bots:
+        return None
+    # devuelve el "name" del primer bot encontrado
+    for cfg in bots.values():
+        return cfg.get("name") or cfg.get("slug")
     return None
 
 # =======================
@@ -332,9 +338,7 @@ def bots_get(slug):
     if not p or not os.path.isfile(p):
         return jsonify({"success": False, "message": "No encontrado"}), 404
     data = _read_json(p)
-    # Normaliza formato
     if "slug" not in data:
-        # formato {"slug": {...}}
         only = list(data.values())[0]
         only["slug"] = slug
         data = only
@@ -371,7 +375,7 @@ def bots_upsert():
     return jsonify({"success": True, "data": payload})
 
 # =======================
-# Endpoints existentes (clientes, usage, etc.)
+# Endpoints existentes
 # =======================
 @billing_bp.route("/health", methods=["GET"])
 def health():
@@ -381,7 +385,6 @@ def health():
 def list_clients():
     bots_config = load_bots_folder()
     period = request.args.get("period") or _period_ym()
-
     items = []
     for cfg in bots_config.values():
         if not isinstance(cfg, dict):
@@ -389,17 +392,13 @@ def list_clients():
         bot_name = cfg.get("name") or cfg.get("slug") or ""
         if not bot_name:
             continue
-
         business_name = cfg.get("business_name", bot_name)
         email = cfg.get("email") or (cfg.get("contact", {}) or {}).get("email") or ""
         phone = cfg.get("phone") or (cfg.get("contact", {}) or {}).get("phone") or ""
-
         val = _consumption_ref(bot_name, period).get()
         consumo_cents = int((val or {}).get("cents", 0) if isinstance(val, dict) else (val or 0))
-
         status = _get_status(bot_name)
         svc = _get_service_item(bot_name)
-
         items.append({
             "id": bot_name,
             "name": business_name,
@@ -410,7 +409,6 @@ def list_clients():
             "bot_status": status,
             "service_item": svc,
         })
-
     return jsonify({"success": True, "data": items})
 
 @billing_bp.route("/toggle", methods=["POST"])
@@ -418,16 +416,13 @@ def toggle_bot():
     data = request.get_json(silent=True) or {}
     client_id = (data.get("client_id") or "").strip()
     state = (data.get("state") or "").strip().lower()
-
     if state not in ("on", "off") or not client_id:
         return jsonify({"success": False, "message": "Parámetros inválidos"}), 400
-
     bots_config = load_bots_folder()
     bot_norm = _normalize_bot_name(bots_config, client_id) or client_id
     ok = _set_status(bot_norm, state)
     if not ok:
         return jsonify({"success": False, "message": "No se pudo guardar en Firebase"}), 500
-
     return jsonify({"success": True})
 
 @billing_bp.route("/consumption/<bot_name>", methods=["GET"])
@@ -435,7 +430,6 @@ def get_consumption(bot_name):
     period = request.args.get("period") or _period_ym()
     bots_config = load_bots_folder()
     bot_norm = _normalize_bot_name(bots_config, bot_name) or bot_name
-
     val = _consumption_ref(bot_norm, period).get()
     cents = int((val or {}).get("cents", 0) if isinstance(val, dict) else (val or 0))
     return jsonify({"success": True, "bot": bot_norm, "period": period, "consumo_cents": cents})
@@ -444,10 +438,8 @@ def get_consumption(bot_name):
 def service_item(bot):
     bots_config = load_bots_folder()
     bot_norm = _normalize_bot_name(bots_config, bot) or bot
-
     if request.method == "GET":
         return jsonify({"success": True, "service_item": _get_service_item(bot_norm)})
-
     data = request.get_json(silent=True) or {}
     enabled = bool(data.get("enabled", True))
     amount  = _as_float(data.get("amount", 0.0))
@@ -460,29 +452,21 @@ def usage(bot):
     start = (request.args.get("start") or "").strip()
     end   = (request.args.get("end") or "").strip()
     from_number = (request.args.get("from_number") or "").strip()
-
     if not start or not end:
         return jsonify({"success": False, "message": "start y end son requeridos (YYYY-MM-DD)"}), 400
-
     bots_config = load_bots_folder()
     bot_cfg = None
     bot_name = None
     for cfg in bots_config.values():
         if cfg.get("name", "").lower() == bot.lower() or cfg.get("slug","").lower()==bot.lower():
-            bot_cfg = cfg
-            bot_name = cfg.get("name") or cfg.get("slug")
-            break
+            bot_cfg = cfg; bot_name = cfg.get("name") or cfg.get("slug"); break
     if not bot_name:
-        bot_name = bot
-        bot_cfg = {}
-
+        bot_name = bot; bot_cfg = {}
     oa = _sum_openai(bot_name, start, end)
     tw = _twilio_sum_prices(bot_cfg, start, end, from_number_override=from_number)
     svc = _get_service_item(bot_name)
-
     subtotal = oa.get("cost_estimate_usd", 0.0) + tw.get("price_usd", 0.0)
     total = subtotal + (svc["amount"] if svc["enabled"] else 0.0)
-
     payload = {
         "bot": bot_name,
         "range": {"start": start, "end": end},
@@ -501,22 +485,16 @@ def usage_ts(bot):
     from_number = (request.args.get("from_number") or "").strip()
     if not start or not end:
         return jsonify({"success": False, "message": "start y end son requeridos (YYYY-MM-DD)"}), 400
-
     bots_config = load_bots_folder()
     bot_cfg = None
     bot_name = None
     for cfg in bots_config.values():
         if cfg.get("name", "").lower() == bot.lower() or cfg.get("slug","").lower()==bot.lower():
-            bot_cfg = cfg
-            bot_name = cfg.get("name") or cfg.get("slug")
-            break
+            bot_cfg = cfg; bot_name = cfg.get("name") or cfg.get("slug"); break
     if not bot_name:
-        bot_name = bot
-        bot_cfg = {}
-
+        bot_name = bot; bot_cfg = {}
     oa_all = _sum_openai(bot_name, start, end)
     tw_all = _twilio_series(bot_cfg, start, end, from_number_override=from_number)
-
     return jsonify({
         "success": True,
         "bot": bot_name,
@@ -554,10 +532,8 @@ def track_openai():
     record_openai_usage(bot, model, itok, otok)
     return jsonify({"success": True})
 
-# (La página HTML /panel se queda igual que ya tenías)
-
 # =======================
-# === Webhook ElevenLabs + Email opcional ===
+# Email & Webhook ElevenLabs
 # =======================
 import smtplib, ssl
 from email.message import EmailMessage
@@ -574,13 +550,11 @@ def _smtp_settings():
         "to_addrs": [a.strip() for a in (os.getenv("EMAIL_TO", "").split(",") if os.getenv("EMAIL_TO") else []) if a.strip()],
     }
 
-def _send_email(subject: str, body_text: str, attachments: list = None, to_addrs: list = None):
-    """attachments: lista de dicts {"filename": str, "content": bytes, "mime": "audio/mpeg" ...}
-       to_addrs: lista de destinatarios (si None, usa EMAIL_TO del entorno)"""
+def _send_email(subject: str, body_text: str, attachments: list = None, to_addrs: list = None, html_body: str = None):
     cfg = _smtp_settings()
     final_to = to_addrs if (to_addrs and len(to_addrs)>0) else cfg["to_addrs"]
     if not (cfg["host"] and cfg["from_addr"] and final_to):
-        print("[email] ⚠️ SMTP no configurado o sin destinatarios (SMTP_HOST/PORT/USER/PASS, EMAIL_FROM, EMAIL_TO o to_addrs). Solo log.")
+        print("[email] ⚠️ SMTP no configurado o sin destinatarios. Solo log.")
         print("[email] Asunto:", subject)
         print("[email] Para:", final_to or "(vacío)")
         print("[email] Texto:\n", body_text)
@@ -590,7 +564,9 @@ def _send_email(subject: str, body_text: str, attachments: list = None, to_addrs
     msg["Subject"] = subject
     msg["From"] = cfg["from_addr"]
     msg["To"] = ", ".join(final_to)
-    msg.set_content(body_text)
+    msg.set_content(body_text or "(ver versión HTML)")
+    if html_body:
+        msg.add_alternative(html_body, subtype="html")
 
     for att in (attachments or []):
         try:
@@ -625,39 +601,28 @@ def _download_file(url: str, timeout: int = 15):
 
 # ====== Resolución de destinatarios por BOT ======
 def _extract_emails_from_cfg(cfg: dict) -> list:
-    """Devuelve lista de correos en orden de prioridad:
-       notify.emails -> emails -> contact.email"""
     emails = []
-
-    # notify.emails (preferido)
     notify = cfg.get("notify") or {}
     if isinstance(notify, dict):
         arr = notify.get("emails")
         if isinstance(arr, list):
             emails.extend([e for e in arr if isinstance(e, str) and e.strip()])
-
-    # emails (array)
     if not emails:
         arr2 = cfg.get("emails")
         if isinstance(arr2, list):
             emails.extend([e for e in arr2 if isinstance(e, str) and e.strip()])
-
-    # contact.email (string)
     if not emails:
         contact = cfg.get("contact") or {}
         if isinstance(contact, dict):
             ce = contact.get("email")
             if isinstance(ce, str) and ce.strip():
                 emails.append(ce.strip())
-
     return [e.strip() for e in emails if e and isinstance(e, str)]
 
 def _find_bot_cfg_for_payload(payload: dict) -> dict:
-    """Intenta identificar el bot según varios campos del payload y la carpeta ./bots"""
     bots = load_bots_folder()
     if not bots:
         return {}
-
     candidates = []
     for key in ("bot_slug","agent_slug","bot","agent","agent_name","assistant","assistant_name"):
         v = (payload.get(key) or "").strip()
@@ -665,25 +630,18 @@ def _find_bot_cfg_for_payload(payload: dict) -> dict:
     for key in ("agent_number","twilio_to","to","line","number","assistant_number","recipient_number"):
         v = (payload.get(key) or "").strip()
         if v: candidates.append(v)
-
     extra = payload.get("extra") or {}
     if isinstance(extra, dict):
         for key in ("bot","agent","agent_number","to","twilio_to","number","recipient_number"):
             v = (extra.get(key) or "").strip()
             if v: candidates.append(v)
-
-    # 1) slug exacto
     for cand in candidates:
         if cand in bots:
             return bots[cand]
-
-    # 2) nombre
     for cand in candidates:
         for cfg in bots.values():
             if str(cfg.get("name","")).strip().lower() == cand.strip().lower():
                 return cfg
-
-    # 3) número
     for cand in candidates:
         c = cand.strip().lower()
         for cfg in bots.values():
@@ -691,16 +649,15 @@ def _find_bot_cfg_for_payload(payload: dict) -> dict:
                 return cfg
             if str(cfg.get("whatsapp_number","")).strip().lower() == c:
                 return cfg
-
-    # 4) 'to' con formato que coincida con slug
     to_v = (payload.get("to") or "").strip()
     if to_v and to_v in bots:
         return bots[to_v]
-
+    # último recurso: primero de la carpeta
+    for cfg in bots.values():
+        return cfg
     return {}
 
 def _bot_emails_for_event(payload: dict) -> list:
-    """Obtiene lista de emails específicos del bot. Si no hay, usa EMAIL_TO."""
     cfg = _find_bot_cfg_for_payload(payload)
     emails = _extract_emails_from_cfg(cfg) if cfg else []
     if emails:
@@ -712,98 +669,131 @@ def _bot_emails_for_event(payload: dict) -> list:
 def _verify_eleven_signature(req) -> bool:
     secret = os.getenv("ELEVEN_WEBHOOK_SECRET", "").strip()
     if not secret:
-        return True  # no forzamos si no está configurado
+        return True
     sig = req.headers.get("ElevenLabs-Signature") or req.headers.get("X-ElevenLabs-Signature") or ""
     if not sig:
-        print("[eleven_webhook] ⚠️ Falta header de firma. Se continúa por compatibilidad.")
+        print("[eleven_webhook] ⚠️ Falta header de firma.")
         return True
-    # Eleven suele firmar con HMAC-SHA256 del cuerpo; comparamos el hexdigest
     body = req.get_data() or b""
     digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
     ok = hmac.compare_digest(sig.strip(), digest.strip()) or hmac.compare_digest(sig.replace("sha256=","").strip(), digest.strip())
     if not ok:
         print("[eleven_webhook] ⚠️ Firma HMAC no coincide. Header:", sig, " Calculada:", digest)
-    return True  # dejamos pasar pero lo registramos (cámbialo a 'ok' si quieres bloquear)
+    return True
 
+# ====== Render bonito de conversación (HTML + texto) ======
+_BRAND_BG = "#0b1220"       # fondo oscuro elegante
+_BRAND_ACCENT = "#f59e0b"   # dorado/ámbar IN Houston Texas
+_BADGE_AGENT = "#0ea5e9"    # celeste para agente
+_BADGE_USER  = "#22c55e"    # verde para cliente
+
+def _render_transcript_blocks(transcript_list):
+    """
+    transcript_list: lista de dicts con {role: 'agent'|'user', message: '...'}
+    Devuelve (text_plain, html)
+    """
+    lines_txt = []
+    blocks_html = []
+    for item in (transcript_list or []):
+        role = (item.get("role") or "").lower()
+        msg  = (item.get("message") or "").strip()
+        if not msg:
+            continue
+        who = "Agente" if role == "agent" else "Cliente"
+        badge_color = _BADGE_AGENT if role == "agent" else _BADGE_USER
+        # texto plano
+        lines_txt.append(f"{who}: {msg}")
+        # bloque html
+        blocks_html.append(f"""
+          <div style="margin:10px 0;padding:12px 14px;background:#111827;border:1px solid #1f2937;border-radius:12px;">
+            <span style="display:inline-block;background:{badge_color};color:#0b1220;font-weight:700;font-size:12px;padding:2px 8px;border-radius:999px;margin-bottom:8px">{who}</span>
+            <div style="color:#e5e7eb;line-height:1.5;font-size:15px;">{_escape_html(msg)}</div>
+          </div>
+        """)
+    html = "\n".join(blocks_html)
+    txt  = "\n".join(lines_txt)
+    return txt, html
+
+def _escape_html(s: str) -> str:
+    return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+
+def _build_branded_email(agent_name, caller, customer_name, transcript_list):
+    # cuerpo texto plano
+    txt_header = []
+    if agent_name: txt_header.append(f"Agente: {agent_name}")
+    if customer_name: txt_header.append(f"Cliente: {customer_name}")
+    if caller: txt_header.append(f"Tel: {caller}")
+    txt_conv, _html_blocks = _render_transcript_blocks(transcript_list)
+    text_plain = "\n".join(txt_header + ["", txt_conv])
+
+    # HTML con marca
+    _, html_blocks = _render_transcript_blocks(transcript_list)
+    html = f"""
+    <div style="background:{_BRAND_BG};padding:24px;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial;color:#e5e7eb;">
+      <div style="max-width:760px;margin:0 auto;">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px">
+          <div style="font-weight:800;font-size:18px;color:{_BRAND_ACCENT};letter-spacing:.5px">IN HOUSTON TEXAS</div>
+          <div style="height:18px;width:2px;background:{_BRAND_ACCENT};opacity:.7"></div>
+          <div style="opacity:.8">Resumen de llamada</div>
+        </div>
+        <div style="background:#0f172a;border:1px solid #1f2937;border-radius:14px;padding:16px 18px;margin-bottom:14px">
+          <div style="display:flex;flex-wrap:wrap;gap:12px;">
+            <div><span style="background:{_BADGE_AGENT};color:#0b1220;font-weight:700;padding:4px 10px;border-radius:999px">Agente: {_escape_html(agent_name or '—')}</span></div>
+            <div><span style="background:{_BADGE_USER};color:#0b1220;font-weight:700;padding:4px 10px;border-radius:999px">Cliente: {_escape_html(customer_name or '—')}</span></div>
+            <div><span style="background:{_BRAND_ACCENT};color:#0b1220;font-weight:700;padding:4px 10px;border-radius:999px">Tel: {_escape_html(caller or '—')}</span></div>
+          </div>
+        </div>
+        <div>
+          {html_blocks or '<div style="color:#9ca3af">No hay mensajes.</div>'}
+        </div>
+      </div>
+    </div>
+    """
+    return text_plain, html
+
+# ====== Webhook principal ======
 @billing_bp.route("/webhooks/eleven/post-call", methods=["POST"])
 def eleven_post_call():
-    """
-    Webhook genérico para ElevenLabs Post-Call.
-    Espera un JSON con (ejemplos):
-      - caller / phone / from
-      - started_at / ended_at / duration_seconds
-      - transcript (texto)
-      - summary (opcional)
-      - recordings: [ { "url": "...", "format": "mp3" }, ... ]
-      - agent / bot (nombre o slug)
-      - extra: { name, lastname, email, ... }
-    """
-    _verify_eleven_signature(request)  # no bloquea, solo avisa si no coincide
+    _verify_eleven_signature(request)
 
     payload = request.get_json(silent=True) or {}
     print("[eleven_webhook] payload:", payload)
 
-    # Fallbacks robustos para campos comunes
+    # Estructuras comunes
+    data = payload.get("data") or {}
+    transcript_list = data.get("transcript") or payload.get("transcript") or []
+
+    # caller
     caller = (
         payload.get("caller") or payload.get("from") or payload.get("phone") or
-        (payload.get("call") or {}).get("from") or ""
+        (payload.get("call") or {}).get("from") or data.get("caller") or ""
     )
-    agent  = (
-        payload.get("agent")  or payload.get("bot") or payload.get("agent_name") or
-        (payload.get("call") or {}).get("agent") or ""
-    )
-    started= payload.get("started_at") or (payload.get("call") or {}).get("started_at") or ""
-    ended  = payload.get("ended_at")   or (payload.get("call") or {}).get("ended_at") or ""
-    dur    = (
-        payload.get("duration_seconds") or payload.get("duration") or
-        (payload.get("call") or {}).get("duration_seconds") or ""
-    )
-    trans  = payload.get("transcript") or (payload.get("call") or {}).get("transcript") or ""
-    summ   = payload.get("summary")    or (payload.get("call") or {}).get("summary") or ""
-    extra  = payload.get("extra") or payload.get("contact") or {}
 
-    # Si no traen 'agent', lo resolvemos por el bot del payload/carpeta
-    if not agent:
+    # nombre agente: primero el que venga, si no, el bot detectado, si no, el primer bot
+    agent_name = (
+        payload.get("agent")  or payload.get("bot") or payload.get("agent_name") or
+        (payload.get("call") or {}).get("agent") or data.get("agent_name") or ""
+    )
+    if not agent_name:
         cfg_guess = _find_bot_cfg_for_payload(payload)
         if cfg_guess:
-            agent = cfg_guess.get("name") or cfg_guess.get("slug") or "Agente"
+            agent_name = cfg_guess.get("name") or cfg_guess.get("slug")
+    if not agent_name:
+        agent_name = _first_bot_name() or "Agente"
 
-    recs   = payload.get("recordings") or payload.get("recording_urls") or []
-    # normaliza recordings si vienen como string
+    # nombre cliente (si viene capturado en extra/contact)
+    extra  = payload.get("extra") or payload.get("contact") or data.get("contact") or {}
+    customer_name = None
+    if isinstance(extra, dict):
+        fn = (extra.get("name") or extra.get("first_name") or "").strip()
+        ln = (extra.get("lastname") or extra.get("last_name") or "").strip()
+        full = " ".join([p for p in [fn, ln] if p])
+        customer_name = full or None
+
+    # Adjuntos: primer audio (opc.)
+    recs   = payload.get("recordings") or payload.get("recording_urls") or data.get("recordings") or []
     if isinstance(recs, str):
         recs = [recs]
-
-    # Construir cuerpo de email (con fallback al JSON crudo)
-    lines = []
-    lines.append(f"Agente/Bot: {agent or 'Agente'}")
-    lines.append(f"Llamada de: {caller or 'desconocido'}")
-    if started or ended:
-        lines.append(f"Inicio: {started or '-'}  |  Fin: {ended or '-'}")
-    if dur:
-        lines.append(f"Duración (s): {dur}")
-
-    if isinstance(extra, dict) and any(k in extra for k in ("name","lastname","email")):
-        lines.append("— Datos capturados —")
-        if extra.get("name"):     lines.append(f"Nombre: {extra.get('name')}")
-        if extra.get("lastname"): lines.append(f"Apellido: {extra.get('lastname')}")
-        if extra.get("email"):    lines.append(f"Email: {extra.get('email')}")
-
-    if summ:
-        lines.append("\n== Resumen ==")
-        lines.append(str(summ))
-    if trans:
-        lines.append("\n== Transcripción ==")
-        lines.append(str(trans))
-
-    # Si todo vino vacío, mete el JSON crudo para depurar
-    if len("\n".join(lines).strip()) == 0 or (not trans and not summ and not caller and not agent):
-        lines.append("\n== Payload recibido ==")
-        try:
-            lines.append(json.dumps(payload, ensure_ascii=False, indent=2))
-        except Exception:
-            lines.append(str(payload))
-
-    # Adjuntar primer audio si hay
     attachments = []
     first_audio = None
     if isinstance(recs, list) and recs:
@@ -813,33 +803,40 @@ def eleven_post_call():
         elif isinstance(first, str):
             first_audio = first
     if first_audio:
-        data, mime = _download_file(first_audio)
-        if data:
+        data_bytes, mime = _download_file(first_audio)
+        if data_bytes:
             ext = "mp3"
-            if "wav" in (mime or "") or first_audio.endswith(".wav"):
+            if "wav" in (mime or "") or str(first_audio).endswith(".wav"):
                 ext = "wav"
             attachments.append({
                 "filename": f"call_recording.{ext}",
-                "content": data,
+                "content": data_bytes,
                 "mime": mime or "audio/mpeg"
             })
-        else:
-            lines.append(f"\n(No se pudo descargar grabación: {first_audio})")
 
     # Destinatarios por BOT
     recipients = _bot_emails_for_event(payload)
-    print("[eleven_webhook] Destinatarios resueltos:", recipients or "(vacío)")
+    print("[eleven_webhook] Destinatarios:", recipients or "(vacío)")
 
-    subj = f"[Post-Call] {agent or 'Agente'} – {caller or 'desconocido'}"
-    _send_email(subj, "\n".join(lines), attachments, to_addrs=recipients)
+    # Render bonito
+    text_plain, html_body = _build_branded_email(agent_name, caller, customer_name, transcript_list)
 
+    # Asunto deseado: incluye nombre del agente y caller
+    subj = f"[Post-Call] {agent_name} – {caller or 'desconocido'}"
+
+    _send_email(subj, text_plain, attachments, to_addrs=recipients, html_body=html_body)
     return jsonify({"ok": True})
 
 @billing_bp.route("/webhooks/test-email", methods=["GET"])
 def test_email():
-    """Envía un email de prueba usando las variables SMTP_*/EMAIL_* del entorno."""
     ok = _send_email(
         subject="Prueba INH Billing – SMTP",
-        body_text="Esto es un correo de prueba desde /billing/webhooks/test-email.\nSi lo recibes, la configuración SMTP está OK."
+        body_text="Esto es un correo de prueba desde /billing/webhooks/test-email.\nSi lo recibes, la configuración SMTP está OK.",
+        html_body="""
+        <div style="font-family:system-ui;padding:16px">
+          <h2>Prueba INH Billing – SMTP</h2>
+          <p>Si ves este correo, la configuración SMTP funciona.</p>
+        </div>
+        """
     )
     return jsonify({"ok": bool(ok)})
