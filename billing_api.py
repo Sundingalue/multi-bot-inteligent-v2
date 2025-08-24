@@ -1,13 +1,11 @@
 # billing_api.py
 # Maestro de Facturación (panel factura clientes) + Gráficos en vivo
-# + CRUD de bots (sincroniza con carpeta ./bots para edición desde WP y VSCode)
-# - Endpoints: clients, toggle, consumption, service-item, usage, invoice, usage_ts, track/openai
-# - NUEVOS: /billing/bots (GET, POST), /billing/bots/<slug> (GET, DELETE)
+# - Endpoints: clients, toggle, consumption (legacy), service-item, usage, invoice, usage_ts, track/openai
 # - Página /billing/panel: tabla + modal de detalle + sección de gráficos en vivo
 
 from flask import Blueprint, request, jsonify
 from datetime import datetime, timedelta
-import os, json, glob, re
+import os, json, glob
 
 from firebase_admin import db
 from twilio.rest import Client as TwilioClient
@@ -17,32 +15,6 @@ billing_bp = Blueprint("billing_bp", __name__)
 # =======================
 # Helpers
 # =======================
-def _here(*p):
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), *p)
-
-def _bots_dir():
-    d = _here("bots")
-    os.makedirs(d, exist_ok=True)
-    return d
-
-def _bot_path(slug: str):
-    safe = re.sub(r"[^a-zA-Z0-9_\-\.]", "-", (slug or "").strip())
-    if not safe:
-        return None
-    return os.path.join(_bots_dir(), f"{safe}.json")
-
-def _read_json(path):
-    if not os.path.isfile(path):
-        return None
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def _write_json(path, data):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
-
 def _utcdate(s: str):
     return datetime.strptime(s, "%Y-%m-%d").date()
 
@@ -63,24 +35,19 @@ def _as_float(x, default=0.0):
         return float(default)
 
 # =======================
-# Bots loader (desde ./bots/*.json)
+# Bots loader
 # =======================
 def load_bots_folder():
     bots = {}
-    for path in glob.glob(os.path.join(_bots_dir(), "*.json")):
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    bots_dir = os.path.join(base_dir, "bots")
+    for path in glob.glob(os.path.join(bots_dir, "*.json")):
         try:
-            data = _read_json(path)
-            if isinstance(data, dict):
-                # Admite dos formatos:
-                # 1) {"slug":{"...config..."}}
-                # 2) {"slug":"...", "name":"...", ...}
-                if "slug" in data:
-                    bots[data["slug"]] = data
-                else:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
                     for k, v in data.items():
-                        if isinstance(v, dict):
-                            v.setdefault("slug", k)
-                            bots[k] = v
+                        bots[k] = v
         except Exception as e:
             print(f"[billing_api] ⚠️ No se pudo cargar {path}: {e}")
     return bots
@@ -138,6 +105,7 @@ def _set_status(bot_name: str, state: str):
 # OpenAI usage (aggregate y serie)
 # =======================
 def record_openai_usage(bot: str, model: str, input_tokens: int, output_tokens: int):
+    """Llamado por main.py después de cada respuesta del modelo."""
     if not bot:
         return
     today = datetime.utcnow().strftime("%Y-%m-%d")
@@ -251,6 +219,7 @@ def _twilio_sum_prices(bot_cfg: dict, start: str, end: str, from_number_override
     return res
 
 def _twilio_series(bot_cfg: dict, start: str, end: str, from_number_override: str = ""):
+    """Serie diaria: mensajes y costo."""
     client = _twilio_client()
     per_day = []
     total_msgs = 0
@@ -304,73 +273,7 @@ def _set_service_item(bot: str, enabled: bool, amount: float, label: str):
     return payload
 
 # =======================
-# CRUD de BOTS (sincroniza con ./bots/*.json)
-# =======================
-@billing_bp.route("/bots", methods=["GET"])
-def bots_list():
-    data = []
-    for slug, cfg in load_bots_folder().items():
-        item = {
-            "slug": slug,
-            "name": cfg.get("name", slug),
-            "system_prompt": cfg.get("system_prompt", ""),
-            "voice": cfg.get("voice", ""),
-            "lang": cfg.get("lang", "es"),
-            "tone": cfg.get("tone", ""),
-            "temperature": cfg.get("temperature", 0.7),
-            "tts_speed": cfg.get("tts_speed", 1.0),
-            "tts_pitch": cfg.get("tts_pitch", 0),
-            "greeting": cfg.get("greeting", ""),
-        }
-        data.append(item)
-    return jsonify({"success": True, "data": data})
-
-@billing_bp.route("/bots/<slug>", methods=["GET"])
-def bots_get(slug):
-    p = _bot_path(slug)
-    if not p or not os.path.isfile(p):
-        return jsonify({"success": False, "message": "No encontrado"}), 404
-    data = _read_json(p)
-    # Normaliza formato
-    if "slug" not in data:
-        # formato {"slug": {...}}
-        only = list(data.values())[0]
-        only["slug"] = slug
-        data = only
-    return jsonify({"success": True, "data": data})
-
-@billing_bp.route("/bots/<slug>", methods=["DELETE"])
-def bots_delete(slug):
-    p = _bot_path(slug)
-    if not p or not os.path.isfile(p):
-        return jsonify({"success": False, "message": "No encontrado"}), 404
-    os.remove(p)
-    return jsonify({"success": True})
-
-@billing_bp.route("/bots", methods=["POST"])
-def bots_upsert():
-    data = request.get_json(silent=True) or {}
-    slug = (data.get("slug") or "").strip()
-    if not slug:
-        return jsonify({"success": False, "message": "slug requerido"}), 400
-    payload = {
-        "slug": slug,
-        "name": data.get("name", slug),
-        "system_prompt": data.get("system_prompt", ""),
-        "voice": data.get("voice", ""),
-        "lang": data.get("lang", "es"),
-        "tone": data.get("tone", ""),
-        "temperature": _as_float(data.get("temperature", 0.7)),
-        "tts_speed": _as_float(data.get("tts_speed", 1.0)),
-        "tts_pitch": _as_float(data.get("tts_pitch", 0)),
-        "greeting": data.get("greeting", ""),
-    }
-    path = _bot_path(slug)
-    _write_json(path, payload)
-    return jsonify({"success": True, "data": payload})
-
-# =======================
-# Endpoints existentes (clientes, usage, etc.)
+# Endpoints públicos JSON
 # =======================
 @billing_bp.route("/health", methods=["GET"])
 def health():
@@ -385,7 +288,7 @@ def list_clients():
     for cfg in bots_config.values():
         if not isinstance(cfg, dict):
             continue
-        bot_name = cfg.get("name") or cfg.get("slug") or ""
+        bot_name = cfg.get("name") or ""
         if not bot_name:
             continue
 
@@ -397,6 +300,7 @@ def list_clients():
         consumo_cents = int((val or {}).get("cents", 0) if isinstance(val, dict) else (val or 0))
 
         status = _get_status(bot_name)
+        # ⬇️ Añadido: incluir service_item en /clients
         svc = _get_service_item(bot_name)
 
         items.append({
@@ -407,7 +311,7 @@ def list_clients():
             "consumo_cents": consumo_cents,
             "consumo_period": period,
             "bot_status": status,
-            "service_item": svc,
+            "service_item": svc,  # ⬅️ nuevo campo
         })
 
     return jsonify({"success": True, "data": items})
@@ -467,9 +371,9 @@ def usage(bot):
     bot_cfg = None
     bot_name = None
     for cfg in bots_config.values():
-        if cfg.get("name", "").lower() == bot.lower() or cfg.get("slug","").lower()==bot.lower():
+        if cfg.get("name", "").lower() == bot.lower():
             bot_cfg = cfg
-            bot_name = cfg.get("name") or cfg.get("slug")
+            bot_name = cfg.get("name")
             break
     if not bot_name:
         bot_name = bot
@@ -495,6 +399,7 @@ def usage(bot):
 
 @billing_bp.route("/usage_ts/<bot>", methods=["GET"])
 def usage_ts(bot):
+    """Serie diaria para gráficos."""
     start = (request.args.get("start") or "").strip()
     end   = (request.args.get("end") or "").strip()
     from_number = (request.args.get("from_number") or "").strip()
@@ -505,9 +410,9 @@ def usage_ts(bot):
     bot_cfg = None
     bot_name = None
     for cfg in bots_config.values():
-        if cfg.get("name", "").lower() == bot.lower() or cfg.get("slug","").lower()==bot.lower():
+        if cfg.get("name", "").lower() == bot.lower():
             bot_cfg = cfg
-            bot_name = cfg.get("name") or cfg.get("slug")
+            bot_name = cfg.get("name")
             break
     if not bot_name:
         bot_name = bot
@@ -553,4 +458,312 @@ def track_openai():
     record_openai_usage(bot, model, itok, otok)
     return jsonify({"success": True})
 
-# (La página HTML /panel se queda igual que ya tenías)
+# =======================
+# Página HTML del panel + gráficos
+# =======================
+@billing_bp.route("/panel", methods=["GET"])
+def billing_panel():
+    # HTML auto-contenido
+    return ("""
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Facturación y Clientes</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    body{font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#0a0a0a; color:#eee; margin:0}
+    .wrap{max-width:1100px; margin:24px auto; padding:0 16px}
+    .badge{display:inline-block; padding:6px 10px; border-radius:999px; background:#222; color:#ffd166; font-weight:600; margin-bottom:8px}
+    table{width:100%; border-collapse:separate; border-spacing:0 10px}
+    th{background:#111; text-align:left; padding:12px; font-size:14px; color:#bbb; border-bottom:1px solid #222}
+    td{background:#151515; padding:14px; vertical-align:middle; border-top:1px solid #222; border-bottom:1px solid #222}
+    td:first-child, th:first-child{border-left:1px solid #222; border-top-left-radius:10px; border-bottom-left-radius:10px}
+    td:last-child, th:last-child{border-right:1px solid #222; border-top-right-radius:10px; border-bottom-right-radius:10px}
+    .name{font-weight:700; color:#fff}
+    .sub{font-size:12px; color:#aaa}
+    .btn{background:#1f1f1f; border:1px solid #333; padding:10px 12px; border-radius:10px; color:#ddd; text-decoration:none; cursor:pointer}
+    .btn:hover{background:#242424}
+    .btn-primary{border-color:#5b5; color:#efe}
+    .switch{display:inline-flex; gap:8px; align-items:center}
+    .dot{width:10px; height:10px; border-radius:50%; background:#2d2}
+    .dot.off{background:#e66}
+    .consumo a{color:#ffd166; text-decoration:underline; cursor:pointer}
+    .row-empty td{opacity:.6}
+    .row-actions{display:flex; gap:8px; align-items:center}
+    .datebox{display:flex; gap:8px; align-items:center; margin:8px 0 16px; flex-wrap:wrap}
+    input[type=date], select, input[type=number], input[type=text]{background:#111; color:#eee; border:1px solid #333; border-radius:8px; padding:8px}
+    .charts{margin-top:28px}
+    .card{background:#0f0f0f; border:1px solid #222; border-radius:14px; padding:14px; margin-bottom:16px}
+    .flex{display:flex; gap:16px; align-items:center; flex-wrap:wrap}
+    /* Modal */
+    .modal{position:fixed; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.6); z-index:1000}
+    .mdcard{background:#0f0f0f; border:1px solid #222; border-radius:14px; max-width:720px; width:92%; padding:18px}
+    .x{float:right; cursor:pointer; color:#aaa}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="badge">Stripe Modo: <b>LIVE</b></div>
+    <h2>Facturación y Clientes</h2>
+
+    <div class="datebox">
+      <label>Desde <input id="dStart" type="date"></label>
+      <label>Hasta <input id="dEnd" type="date"></label>
+      <button class="btn" id="btnReload">Actualizar tabla</button>
+    </div>
+
+    <table id="tbl">
+      <thead>
+        <!-- ⬇️ añadimos columna Servicio entre Teléfono y Consumo -->
+        <tr><th>Cliente</th><th>Email</th><th>Teléfono</th><th>Servicio</th><th>Consumo</th><th>Bot</th><th>Acciones</th></tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+
+    <!-- ========== NUEVA SECCIÓN: Consumo en vivo con gráficos ========== -->
+    <div class="charts">
+      <div class="flex">
+        <h3 style="margin:0">Consumo en vivo</h3>
+        <label>Bot
+          <select id="selBot"></select>
+        </label>
+        <label>Desde <input id="cStart" type="date"></label>
+        <label>Hasta <input id="cEnd" type="date"></label>
+        <button class="btn" id="btnCharts">Actualizar gráficos</button>
+        <label class="flex" style="gap:6px; align-items:center">
+          <input type="checkbox" id="liveChk">
+          Live (30s)
+        </label>
+      </div>
+
+      <div class="card"><canvas id="chOATokens" height="120"></canvas></div>
+      <div class="card"><canvas id="chOACost"   height="120"></canvas></div>
+      <div class="card"><canvas id="chTWMsgs"   height="120"></canvas></div>
+      <div class="card"><canvas id="chTWCost"   height="120"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Modal de detalle (se mantiene) -->
+  <div class="modal" id="modal">
+    <div class="mdcard">
+      <div class="x" onclick="closeModal()">✕</div>
+      <h3 id="md-title">Detalle</h3>
+      <div id="md-range" style="color:#aaa"></div>
+      <div id="md-body" style="margin-top:10px"></div>
+    </div>
+  </div>
+
+<script>
+const tbody = document.getElementById('tbody');
+const modal = document.getElementById('modal');
+const dStart = document.getElementById('dStart');
+const dEnd   = document.getElementById('dEnd');
+
+const selBot = document.getElementById('selBot');
+const cStart = document.getElementById('cStart');
+const cEnd   = document.getElementById('cEnd');
+const liveChk= document.getElementById('liveChk');
+
+let timerLive = null;
+
+function fmtUSD(n){ return '$' + (Number(n||0).toFixed(2)); }
+function periodDefaults(inpStart, inpEnd){
+  const now = new Date();
+  const y = now.getFullYear(), m = String(now.getMonth()+1).padStart(2,'0');
+  const first = `${y}-${m}-01`;
+  const lastD = new Date(y, now.getMonth()+1, 0).getDate();
+  const end = `${y}-${m}-${String(Math.min(now.getDate(), lastD)).padStart(2,'0')}`;
+  if(inpStart && !inpStart.value) inpStart.value = first;
+  if(inpEnd   && !inpEnd.value)   inpEnd.value   = end;
+}
+periodDefaults(dStart, dEnd);
+periodDefaults(cStart, cEnd);
+
+async function saveService(bot, rowEl){
+  const wrap = rowEl.querySelector('.svc-wrap');
+  const enabled = wrap.querySelector('.svc-enabled').checked;
+  const amount  = parseFloat(wrap.querySelector('.svc-amount').value || '0');
+  const label   = (wrap.querySelector('.svc-label').value || '').trim();
+  const btn     = wrap.querySelector('.svc-save');
+
+  btn.disabled = true;
+  try{
+    const res = await fetch(`/billing/service-item/${encodeURIComponent(bot)}`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ enabled, amount, label })
+    });
+    const js = await res.json();
+    if(!js.success){ alert('No se pudo guardar: ' + (js.message||'error')); }
+    else { btn.textContent = 'Guardado ✓'; setTimeout(()=>btn.textContent='Guardar', 1200); }
+  }catch(e){
+    alert('Error de red guardando servicio');
+  }finally{
+    btn.disabled = false;
+  }
+}
+
+async function loadClients(){
+  tbody.innerHTML = '<tr class="row-empty"><td colspan="7">Cargando...</td></tr>';
+  const res = await fetch('/billing/clients');
+  const js = await res.json();
+  if(!js.success){ tbody.innerHTML = '<tr class="row-empty"><td colspan="7">Error cargando clientes</td></tr>'; return; }
+  const rows = js.data.map(row => {
+    const consumo = (row.consumo_cents||0)/100;
+    const svc = row.service_item || {enabled:true, amount:0, label:'Servicio'};
+    return `
+      <tr data-bot="${row.id}">
+        <td><div class="name">${row.name||row.id}</div><div class="sub">ID: ${row.id}</div></td>
+        <td>${row.email||'-'}</td>
+        <td>${row.phone||'-'}</td>
+
+        <!-- Columna Servicio (editable) -->
+        <td>
+          <div class="svc-wrap" style="display:flex;flex-direction:column;gap:6px;max-width:260px">
+            <label style="display:flex;align-items:center;gap:8px">
+              <input type="checkbox" class="svc-enabled" ${svc.enabled?'checked':''}>
+              <span>Cobrar servicio</span>
+            </label>
+            <input type="number" min="0" step="0.01" class="svc-amount" value="${Number(svc.amount||0)}" placeholder="Monto USD">
+            <input type="text" class="svc-label" value="${svc.label?String(svc.label).replace(/"/g,'&quot;'):'Servicio'}" placeholder="Descripción en factura">
+            <button class="btn svc-save">Guardar</button>
+          </div>
+        </td>
+
+        <td class="consumo"><a href="#" data-bot="${row.id}" onclick="openDetail(event)">${fmtUSD(consumo)}</a><div class="sub">${row.consumo_period||''}</div></td>
+        <td><span class="dot ${row.bot_status==='on'?'':'off'}"></span> ${row.bot_status==='on'?'ON':'OFF'}</td>
+        <td>
+          <div class="row-actions">
+            <button class="btn btn-primary" onclick="openDetail(event)" data-bot="${row.id}">Ver detalle</button>
+          </div>
+        </td>
+      </tr>`;
+  }).join('');
+  tbody.innerHTML = rows || '<tr class="row-empty"><td colspan="7">Sin clientes</td></tr>';
+
+  // wire guardar servicio
+  tbody.querySelectorAll('tr[data-bot]').forEach(tr=>{
+    const bot = tr.getAttribute('data-bot');
+    const btn = tr.querySelector('.svc-save');
+    btn.addEventListener('click', ()=>saveService(bot, tr));
+  });
+
+  // llenar selector de bot si está vacío
+  if(!selBot.options.length){
+    js.data.forEach(r=>{
+      const opt = document.createElement('option');
+      opt.value = r.id; opt.textContent = r.name || r.id;
+      selBot.appendChild(opt);
+    });
+  }
+}
+
+async function openDetail(ev){
+  ev.preventDefault();
+  const bot = ev.target.getAttribute('data-bot');
+  if(!bot) return;
+  const start = dStart.value, end = dEnd.value;
+  const res = await fetch(`/billing/usage/${encodeURIComponent(bot)}?start=${start}&end=${end}`);
+  const js = await res.json();
+  document.getElementById('md-title').textContent = `Detalle: ${js.bot}`;
+  document.getElementById('md-range').textContent = `Rango: ${js.range.start} → ${js.range.end}`;
+  const oa = js.openai || {}; const tw = js.twilio || {}; const svc = js.service_item || {};
+  document.getElementById('md-body').innerHTML = `
+    <div><b>OpenAI</b><br/>Requests: ${oa.requests||0} · Tokens in/out: ${oa.input_tokens||0} / ${oa.output_tokens||0} · Costo: <b>${fmtUSD(oa.cost_estimate_usd||0)}</b></div>
+    <div style="margin-top:8px"><b>Twilio</b><br/>Mensajes: ${tw.messages||0} · Costo: <b>${fmtUSD(tw.price_usd||0)}</b></div>
+    <div style="margin-top:8px"><b>Servicio</b><br/>${svc.label||'Servicio'}: <b>${svc.enabled?fmtUSD(svc.amount||0):'Deshabilitado'}</b></div>
+    <div style="margin-top:8px"><b>Total</b><br/>Subtotal (OAI+Tw): ${fmtUSD(js.subtotal_usd||0)} · Total: <b>${fmtUSD(js.total_usd||0)}</b></div>`;
+  modal.style.display='flex';
+}
+function closeModal(){ modal.style.display='none'; }
+
+document.getElementById('btnReload').addEventListener('click', loadClients);
+window.addEventListener('load', loadClients);
+window.addEventListener('keydown', (e)=>{ if(e.key==='Escape') closeModal(); });
+
+/* =========== GRÁFICOS =========== */
+let chOATokens, chOACost, chTWMsgs, chTWCost;
+
+function buildOrUpdate(chartRef, ctx, type, data, options){
+  if(chartRef && chartRef.destroy) chartRef.destroy();
+  return new Chart(ctx, {type, data, options});
+}
+
+async function loadCharts(){
+  if(!selBot.value) return;
+  const bot = selBot.value;
+  const start = cStart.value, end = cEnd.value;
+  const res = await fetch(`/billing/usage_ts/${encodeURIComponent(bot)}?start=${start}&end=${end}`);
+  const js = await res.json();
+  if(!js.success){ console.error(js); return; }
+  const oa = js.openai, tw = js.twilio;
+
+  const labels = oa.per_day.map(x=>x.date);
+
+  // OpenAI tokens (líneas: input & output)
+  chOATokens = buildOrUpdate(
+    chOATokens,
+    document.getElementById('chOATokens'),
+    'line',
+    {
+      labels,
+      datasets: [
+        {label:'Input tokens', data: oa.per_day.map(x=>x.input_tokens), borderWidth:2, tension:.25},
+        {label:'Output tokens', data: oa.per_day.map(x=>x.output_tokens), borderWidth:2, tension:.25}
+      ]
+    },
+    {responsive:true, plugins:{legend:{labels:{color:'#ddd'}}}, scales:{x:{ticks:{color:'#aaa'}}, y:{ticks:{color:'#aaa'}}}}
+  );
+
+  // OpenAI costo (línea)
+  chOACost = buildOrUpdate(
+    chOACost,
+    document.getElementById('chOACost'),
+    'line',
+    {
+      labels,
+      datasets: [{label:'Costo OpenAI (USD)', data: oa.per_day.map(x=>x.cost_estimate_usd), borderWidth:2, tension:.25}]
+    },
+    {responsive:true, plugins:{legend:{labels:{color:'#ddd'}}}, scales:{x:{ticks:{color:'#aaa'}}, y:{ticks:{color:'#aaa'}}}}
+  );
+
+  // Twilio mensajes (barras)
+  const labelsTw = tw.per_day.map(x=>x.date);
+  chTWMsgs = buildOrUpdate(
+    chTWMsgs,
+    document.getElementById('chTWMsgs'),
+    'bar',
+    {labels: labelsTw, datasets: [{label:'Mensajes Twilio', data: tw.per_day.map(x=>x.messages)}]},
+    {responsive:true, plugins:{legend:{labels:{color:'#ddd'}}}, scales:{x:{ticks:{color:'#aaa'}}, y:{ticks:{color:'#aaa'}}}}
+  );
+
+  // Twilio costo (línea)
+  chTWCost = buildOrUpdate(
+    chTWCost,
+    document.getElementById('chTWCost'),
+    'line',
+    {labels: labelsTw, datasets: [{label:'Costo Twilio (USD)', data: tw.per_day.map(x=>x.price_usd), borderWidth:2, tension:.25}]},
+    {responsive:true, plugins:{legend:{labels:{color:'#ddd'}}}, scales:{x:{ticks:{color:'#aaa'}}, y:{ticks:{color:'#aaa'}}}}
+  );
+}
+
+document.getElementById('btnCharts').addEventListener('click', loadCharts);
+selBot.addEventListener('change', loadCharts);
+
+liveChk.addEventListener('change', ()=>{
+  if(liveChk.checked){
+    if(timerLive) clearInterval(timerLive);
+    timerLive = setInterval(loadCharts, 30000); // 30s
+    loadCharts();
+  }else{
+    if(timerLive) clearInterval(timerLive);
+    timerLive = null;
+  }
+});
+window.addEventListener('load', ()=>{ if(selBot.value) loadCharts(); });
+
+</script>
+</body></html>
+    """), 200, {"Content-Type": "text/html; charset=utf-8"}
