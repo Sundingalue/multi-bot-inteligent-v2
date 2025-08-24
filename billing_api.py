@@ -1,7 +1,9 @@
 # billing_api.py
-# Maestro de Facturación (panel factura clientes) + Gráficos en vivo + CRUD de bots (JSON en carpeta bots)
+# Maestro de Facturación (panel factura clientes) + Gráficos en vivo
+# + CRUD de bots (sincroniza con carpeta ./bots para edición desde WP y VSCode)
 # - Endpoints: clients, toggle, consumption, service-item, usage, invoice, usage_ts, track/openai
-# - NUEVO: /billing/bots (lista/crea/edita/borra) para sincronizar con carpeta "bots" (VS Code)
+# - NUEVOS: /billing/bots (GET, POST), /billing/bots/<slug> (GET, DELETE)
+# - Página /billing/panel: tabla + modal de detalle + sección de gráficos en vivo
 
 from flask import Blueprint, request, jsonify
 from datetime import datetime, timedelta
@@ -15,6 +17,32 @@ billing_bp = Blueprint("billing_bp", __name__)
 # =======================
 # Helpers
 # =======================
+def _here(*p):
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), *p)
+
+def _bots_dir():
+    d = _here("bots")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+def _bot_path(slug: str):
+    safe = re.sub(r"[^a-zA-Z0-9_\-\.]", "-", (slug or "").strip())
+    if not safe:
+        return None
+    return os.path.join(_bots_dir(), f"{safe}.json")
+
+def _read_json(path):
+    if not os.path.isfile(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def _write_json(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
 def _utcdate(s: str):
     return datetime.strptime(s, "%Y-%m-%d").date()
 
@@ -34,81 +62,36 @@ def _as_float(x, default=0.0):
     except Exception:
         return float(default)
 
-def _slugify(txt: str) -> str:
-    s = re.sub(r'[^a-zA-Z0-9\-_\s]+', '', (txt or '')).strip().lower()
-    s = re.sub(r'[\s_]+', '-', s)
-    return s[:60] or 'bot'
-
 # =======================
-# Bots loader (carpeta ./bots)
+# Bots loader (desde ./bots/*.json)
 # =======================
-def _bots_dir():
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    d = os.path.join(base_dir, "bots")
-    os.makedirs(d, exist_ok=True)
-    return d
-
-def _read_json_file(path: str):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"[billing_api] ⚠️ No se pudo leer {path}: {e}")
-        return None
-
-def _write_json_file(path: str, data: dict):
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        return True
-    except Exception as e:
-        print(f"[billing_api] ❌ No se pudo escribir {path}: {e}")
-        return False
-
 def load_bots_folder():
-    """
-    Devuelve dict { slug (o name): config }
-    Soporta 2 formatos:
-      a) archivo por bot: { "name": "...", "slug": "...", ... }
-      b) 'maestro' con varios: { "Bot A": {...}, "Bot B": {...} }
-    """
     bots = {}
-    bots_dir = _bots_dir()
-    for path in glob.glob(os.path.join(bots_dir, "*.json")):
-        data = _read_json_file(path)
-        if not isinstance(data, dict):
-            continue
-        # (a) archivo por bot
-        if "name" in data or "slug" in data or "system_prompt" in data:
-            name = (data.get("name") or data.get("slug") or os.path.splitext(os.path.basename(path))[0]).strip()
-            slug = (data.get("slug") or _slugify(name) or os.path.splitext(os.path.basename(path))[0])
-            data["name"] = data.get("name") or name
-            data["slug"] = slug
-            bots[slug] = data
-            continue
-        # (b) maestro
-        for k, v in data.items():
-            if isinstance(v, dict):
-                name = v.get("name") or k
-                slug = v.get("slug") or _slugify(name)
-                v["name"] = name
-                v["slug"] = slug
-                bots[slug] = v
+    for path in glob.glob(os.path.join(_bots_dir(), "*.json")):
+        try:
+            data = _read_json(path)
+            if isinstance(data, dict):
+                # Admite dos formatos:
+                # 1) {"slug":{"...config..."}}
+                # 2) {"slug":"...", "name":"...", ...}
+                if "slug" in data:
+                    bots[data["slug"]] = data
+                else:
+                    for k, v in data.items():
+                        if isinstance(v, dict):
+                            v.setdefault("slug", k)
+                            bots[k] = v
+        except Exception as e:
+            print(f"[billing_api] ⚠️ No se pudo cargar {path}: {e}")
     return bots
 
 def _normalize_bot_name(bots_config: dict, name: str):
     if not name:
         return None
-    ns = str(name).lower()
     for cfg in bots_config.values():
-        if not isinstance(cfg, dict): 
-            continue
-        if cfg.get("slug", "").lower() == ns or cfg.get("name", "").lower() == ns:
+        if isinstance(cfg, dict) and cfg.get("name", "").lower() == str(name).lower():
             return cfg.get("name")
     return None
-
-def _bot_path(slug: str) -> str:
-    return os.path.join(_bots_dir(), f"{slug}.json")
 
 # =======================
 # RTDB paths
@@ -155,7 +138,6 @@ def _set_status(bot_name: str, state: str):
 # OpenAI usage (aggregate y serie)
 # =======================
 def record_openai_usage(bot: str, model: str, input_tokens: int, output_tokens: int):
-    """Llamado por main.py después de cada respuesta del modelo."""
     if not bot:
         return
     today = datetime.utcnow().strftime("%Y-%m-%d")
@@ -322,7 +304,73 @@ def _set_service_item(bot: str, enabled: bool, amount: float, label: str):
     return payload
 
 # =======================
-# Endpoints públicos JSON (existentes)
+# CRUD de BOTS (sincroniza con ./bots/*.json)
+# =======================
+@billing_bp.route("/bots", methods=["GET"])
+def bots_list():
+    data = []
+    for slug, cfg in load_bots_folder().items():
+        item = {
+            "slug": slug,
+            "name": cfg.get("name", slug),
+            "system_prompt": cfg.get("system_prompt", ""),
+            "voice": cfg.get("voice", ""),
+            "lang": cfg.get("lang", "es"),
+            "tone": cfg.get("tone", ""),
+            "temperature": cfg.get("temperature", 0.7),
+            "tts_speed": cfg.get("tts_speed", 1.0),
+            "tts_pitch": cfg.get("tts_pitch", 0),
+            "greeting": cfg.get("greeting", ""),
+        }
+        data.append(item)
+    return jsonify({"success": True, "data": data})
+
+@billing_bp.route("/bots/<slug>", methods=["GET"])
+def bots_get(slug):
+    p = _bot_path(slug)
+    if not p or not os.path.isfile(p):
+        return jsonify({"success": False, "message": "No encontrado"}), 404
+    data = _read_json(p)
+    # Normaliza formato
+    if "slug" not in data:
+        # formato {"slug": {...}}
+        only = list(data.values())[0]
+        only["slug"] = slug
+        data = only
+    return jsonify({"success": True, "data": data})
+
+@billing_bp.route("/bots/<slug>", methods=["DELETE"])
+def bots_delete(slug):
+    p = _bot_path(slug)
+    if not p or not os.path.isfile(p):
+        return jsonify({"success": False, "message": "No encontrado"}), 404
+    os.remove(p)
+    return jsonify({"success": True})
+
+@billing_bp.route("/bots", methods=["POST"])
+def bots_upsert():
+    data = request.get_json(silent=True) or {}
+    slug = (data.get("slug") or "").strip()
+    if not slug:
+        return jsonify({"success": False, "message": "slug requerido"}), 400
+    payload = {
+        "slug": slug,
+        "name": data.get("name", slug),
+        "system_prompt": data.get("system_prompt", ""),
+        "voice": data.get("voice", ""),
+        "lang": data.get("lang", "es"),
+        "tone": data.get("tone", ""),
+        "temperature": _as_float(data.get("temperature", 0.7)),
+        "tts_speed": _as_float(data.get("tts_speed", 1.0)),
+        "tts_pitch": _as_float(data.get("tts_pitch", 0)),
+        "greeting": data.get("greeting", ""),
+    }
+    path = _bot_path(slug)
+    _write_json(path, payload)
+    return jsonify({"success": True, "data": payload})
+
+# =======================
+# Endpoints existentes (clientes, usage, etc.)
 # =======================
 @billing_bp.route("/health", methods=["GET"])
 def health():
@@ -337,7 +385,7 @@ def list_clients():
     for cfg in bots_config.values():
         if not isinstance(cfg, dict):
             continue
-        bot_name = cfg.get("name") or ""
+        bot_name = cfg.get("name") or cfg.get("slug") or ""
         if not bot_name:
             continue
 
@@ -352,7 +400,7 @@ def list_clients():
         svc = _get_service_item(bot_name)
 
         items.append({
-            "id": cfg.get("slug") or _slugify(bot_name),
+            "id": bot_name,
             "name": business_name,
             "email": email,
             "phone": phone,
@@ -374,15 +422,8 @@ def toggle_bot():
         return jsonify({"success": False, "message": "Parámetros inválidos"}), 400
 
     bots_config = load_bots_folder()
-    # aceptar slug o name
-    bot_name = None
-    for cfg in bots_config.values():
-        if cfg.get("slug") == client_id or (cfg.get("name","").lower() == client_id.lower()):
-            bot_name = cfg.get("name")
-            break
-    bot_name = bot_name or client_id
-
-    ok = _set_status(bot_name, state)
+    bot_norm = _normalize_bot_name(bots_config, client_id) or client_id
+    ok = _set_status(bot_norm, state)
     if not ok:
         return jsonify({"success": False, "message": "No se pudo guardar en Firebase"}), 500
 
@@ -426,9 +467,9 @@ def usage(bot):
     bot_cfg = None
     bot_name = None
     for cfg in bots_config.values():
-        if cfg.get("name", "").lower() == bot.lower() or cfg.get("slug","").lower() == bot.lower():
+        if cfg.get("name", "").lower() == bot.lower() or cfg.get("slug","").lower()==bot.lower():
             bot_cfg = cfg
-            bot_name = cfg.get("name")
+            bot_name = cfg.get("name") or cfg.get("slug")
             break
     if not bot_name:
         bot_name = bot
@@ -464,9 +505,9 @@ def usage_ts(bot):
     bot_cfg = None
     bot_name = None
     for cfg in bots_config.values():
-        if cfg.get("name", "").lower() == bot.lower() or cfg.get("slug","").lower() == bot.lower():
+        if cfg.get("name", "").lower() == bot.lower() or cfg.get("slug","").lower()==bot.lower():
             bot_cfg = cfg
-            bot_name = cfg.get("name")
+            bot_name = cfg.get("name") or cfg.get("slug")
             break
     if not bot_name:
         bot_name = bot
@@ -512,82 +553,4 @@ def track_openai():
     record_openai_usage(bot, model, itok, otok)
     return jsonify({"success": True})
 
-# =======================
-# NUEVO: CRUD de bots (carpeta ./bots)
-# =======================
-@billing_bp.route("/bots", methods=["GET", "POST", "PUT"])
-def bots_collection():
-    """
-    GET  -> lista bots
-    POST -> crear/actualizar (upsert)
-    PUT  -> idem POST (opcional)
-    """
-    if request.method == "GET":
-        bots = load_bots_folder()
-        # respuesta mínima para listar en WP
-        out = []
-        for slug, cfg in bots.items():
-            out.append({
-                "slug": slug,
-                "name": cfg.get("name") or slug,
-                "language": cfg.get("language") or cfg.get("lang") or "es",
-                "voice": cfg.get("voice") or "",
-                "tone": cfg.get("tone") or "",
-                "temperature": cfg.get("temperature", 0.7),
-                "system_prompt": cfg.get("system_prompt", ""),
-                "greeting": cfg.get("greeting") or cfg.get("saludo_inicial") or "",
-            })
-        return jsonify({"success": True, "data": out})
-
-    # crear/editar
-    data = request.get_json(silent=True) or {}
-    name = (data.get("name") or "").strip()
-    slug = (data.get("slug") or _slugify(name)).strip()
-    if not slug:
-        return jsonify({"success": False, "message": "slug o name son requeridos"}), 400
-
-    payload = {
-        "name": name or slug,
-        "slug": slug,
-        "language": data.get("language") or data.get("lang") or "es",
-        "voice": data.get("voice") or "",
-        "tone": data.get("tone") or "",
-        "temperature": _as_float(data.get("temperature", 0.7)),
-        "tts_speed": _as_float(data.get("tts_speed", 1.0)),
-        "tts_pitch": _as_float(data.get("tts_pitch", 0.0)),
-        "system_prompt": data.get("system_prompt") or data.get("prompt") or "",
-        "greeting": data.get("greeting") or data.get("saludo_inicial") or "",
-        # campos opcionales que ya usas en consumo / Twilio
-        "twilio_number": data.get("twilio_number") or data.get("whatsapp_number") or "",
-        "contact": data.get("contact") or {},
-        "business_name": data.get("business_name") or data.get("name") or slug,
-        "email": data.get("email") or "",
-        "phone": data.get("phone") or "",
-    }
-    ok = _write_json_file(_bot_path(slug), payload)
-    if not ok:
-        return jsonify({"success": False, "message": "No se pudo guardar el JSON"}), 500
-    return jsonify({"success": True, "data": payload})
-
-@billing_bp.route("/bots/<slug>", methods=["GET", "DELETE"])
-def bot_item(slug):
-    slug = (slug or "").strip()
-    path = _bot_path(slug)
-    if request.method == "GET":
-        data = _read_json_file(path)
-        if not isinstance(data, dict):
-            # intentar buscar por name
-            bots = load_bots_folder()
-            data = bots.get(slug)
-        if not isinstance(data, dict):
-            return jsonify({"success": False, "message": "Bot no encontrado"}), 404
-        return jsonify({"success": True, "data": data})
-
-    # DELETE
-    if not os.path.exists(path):
-        return jsonify({"success": False, "message": "Bot no encontrado"}), 404
-    try:
-        os.remove(path)
-        return jsonify({"success": True})
-    except Exception as e:
-        return jsonify({"success": False, "message": f"No se pudo borrar: {e}"}), 500
+# (La página HTML /panel se queda igual que ya tenías)
