@@ -85,19 +85,21 @@ def _gpt_reply(messages, model_name: str, temperature: float):
         print(f"[IG] Error OpenAI: {e}")
         return "Estoy teniendo un problema técnico. Intentémoslo de nuevo."
 
-def _send_ig_text(psid: str, text: str):
+def _send_ig_text(psid: str, text: str, page_id: str) -> bool:
     """
     Envía un mensaje de texto al usuario IG (psid) mediante Graph API.
+    IMPORTANTE: Para Instagram se debe usar /{PAGE_ID}/messages (no /me/messages).
     """
     if not META_PAGE_ACCESS_TOKEN:
         print("[IG] META_PAGE_ACCESS_TOKEN vacío. Configúralo en Render.")
         return False
 
-    url = "https://graph.facebook.com/v21.0/me/messages"
-    payload = {
-        "recipient": {"id": psid},
-        "message": {"text": text}
-    }
+    if not page_id:
+        print("[IG] page_id vacío en webhook; no se puede responder.")
+        return False
+
+    url = f"https://graph.facebook.com/v21.0/{page_id}/messages"
+    payload = {"recipient": {"id": psid}, "message": {"text": text}}
     params = {"access_token": META_PAGE_ACCESS_TOKEN}
 
     try:
@@ -155,6 +157,7 @@ def ig_events():
     temperature = float(bot_cfg.get("temperature", 0.6)) if isinstance(bot_cfg.get("temperature", None), (int, float)) else 0.6
 
     for entry in body.get("entry", []):
+        page_id = (entry or {}).get("id")  # <- NECESARIO para /{PAGE_ID}/messages
         for msg in entry.get("messaging", []):
             psid = (msg.get("sender", {}) or {}).get("id")
             message = msg.get("message", {}) or {}
@@ -176,8 +179,8 @@ def ig_events():
                 reply = _gpt_reply(messages, model_name=model_name, temperature=temperature)
                 reply = _apply_style(bot_cfg, reply) or "Gracias por escribirnos."
 
-                # Envía respuesta
-                sent = _send_ig_text(psid, reply)
+                # Envía respuesta (usa page_id correcto)
+                sent = _send_ig_text(psid, reply, page_id)
 
                 # Guarda salida
                 if sent:
