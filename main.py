@@ -78,10 +78,6 @@ if APP_DOWNLOAD_URL_FALLBACK and not _valid_url(APP_DOWNLOAD_URL_FALLBACK):
 client = OpenAI(api_key=OPENAI_API_KEY)
 app = Flask(__name__)
 # --- Exponer recursos al Blueprint de Instagram ---
-app.config["BOTS_CONFIG"] = bots_config          # bots/*.json ya cargados
-app.config["OPENAI_CLIENT"] = client             # cliente OpenAI ya creado
-app.config["FB_APPEND_HISTORIAL"] = fb_append_historial  # función para guardar historial en Firebase
-
 app.secret_key = "supersecreto_sundin_panel_2025"
 
 # ✅ Sesión persistente (remember me)
@@ -481,6 +477,12 @@ def fb_delete_lead(bot_nombre, numero):
     except Exception as e:
         print(f"❌ Error eliminando lead {bot_nombre}/{numero}: {e}")
         return False
+    
+    # --- Exponer recursos al Blueprint de Instagram ---
+app.config["BOTS_CONFIG"] = bots_config
+app.config["OPENAI_CLIENT"] = client
+app.config["FB_APPEND_HISTORIAL"] = fb_append_historial
+
 
 # ✅ NUEVO: vaciar solo el historial (mantener lead)
 def fb_clear_historial(bot_nombre, numero):
