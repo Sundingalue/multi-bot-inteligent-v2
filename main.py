@@ -77,6 +77,11 @@ if APP_DOWNLOAD_URL_FALLBACK and not _valid_url(APP_DOWNLOAD_URL_FALLBACK):
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 app = Flask(__name__)
+# --- Exponer recursos al Blueprint de Instagram ---
+app.config["BOTS_CONFIG"] = bots_config          # bots/*.json ya cargados
+app.config["OPENAI_CLIENT"] = client             # cliente OpenAI ya creado
+app.config["FB_APPEND_HISTORIAL"] = fb_append_historial  # función para guardar historial en Firebase
+
 app.secret_key = "supersecreto_sundin_panel_2025"
 
 # ✅ Sesión persistente (remember me)
@@ -169,7 +174,11 @@ app.register_blueprint(billing_bp, url_prefix="/billing")
 
 # 💡 API móvil (JSON público para la app)
 from bots.api_mobile import mobile_bp
+from routes.instagram_webhook import ig_bp
 app.register_blueprint(mobile_bp, url_prefix="/api/mobile")
+
+app.register_blueprint(ig_bp)  # expone /webhook_instagram (GET verificación, POST eventos)
+
 
 
 # =======================
