@@ -170,7 +170,7 @@ app.register_blueprint(billing_bp, url_prefix="/billing")
 
 # 💡 API móvil (JSON público para la app)
 from bots.api_mobile import mobile_bp
-from routes.instagram_webhook import ig_bp
+from instagram_webhook import ig_bp
 app.register_blueprint(mobile_bp, url_prefix="/api/mobile")
 
 app.register_blueprint(ig_bp)  # expone /webhook_instagram (GET verificación, POST eventos)
