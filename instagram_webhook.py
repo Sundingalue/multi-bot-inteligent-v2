@@ -13,8 +13,8 @@ from flask import Blueprint, request, jsonify, current_app
 ig_bp = Blueprint("instagram_webhook", __name__)
 
 # ===== Variables de entorno necesarias (Render -> Environment) =====
-META_VERIFY_TOKEN = (os.getenv("inh-instagram-2025") or "").strip()
-META_PAGE_ACCESS_TOKEN = (os.getenv("EAADZBlUKm9iIBPWZAgPUNhZA38ZAzfnEM1zg0h3tbipZCDg8auRHxiUTy04OZCNYMlCueoaFLKCH50VH6tu8kvDuGPZB0PeJxzvCt7XfIUBlDurDB4NkUd7U8G2jxvshHnsrbWcL8q3y4BzExbx8BL9dH8sANoVFjPikIwexOZAZCxy5pjkqkraCiUCUCSZCM7sFGU") or "").strip()
+META_VERIFY_TOKEN = (os.getenv("META_VERIFY_TOKEN") or "").strip()
+META_PAGE_ACCESS_TOKEN = (os.getenv("META_PAGE_ACCESS_TOKEN") or "").strip()
 
 # ===== Helpers mínimos (reusarás tu bot JSON ya cargado en main.py) =====
 def _apply_style(bot_cfg: dict, text: str) -> str:
