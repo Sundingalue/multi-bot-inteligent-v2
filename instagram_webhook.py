@@ -2,9 +2,7 @@
 # Webhook de Instagram (Flask Blueprint) - aislado del resto del core
 
 import os
-import json
 import re
-import time
 import requests
 from datetime import datetime
 from flask import Blueprint, request, jsonify, current_app
@@ -13,11 +11,13 @@ from flask import Blueprint, request, jsonify, current_app
 ig_bp = Blueprint("instagram_webhook", __name__)
 
 # ===== Variables de entorno necesarias (Render -> Environment) =====
-META_VERIFY_TOKEN = (os.getenv("META_VERIFY_TOKEN") or "").strip()
+# Deben estar definidas en Render → Environment (sin comillas)
+META_VERIFY_TOKEN     = (os.getenv("META_VERIFY_TOKEN") or "").strip()
 META_PAGE_ACCESS_TOKEN = (os.getenv("META_PAGE_ACCESS_TOKEN") or "").strip()
-IG_USER_ID = (os.getenv("META_IG_USER_ID") or "").strip()
+IG_USER_ID            = (os.getenv("META_IG_USER_ID") or "").strip()       # p.ej. 17841460637585682
+IG_BOT_NAME           = (os.getenv("META_IG_BOT_NAME") or "").strip()      # opcional: p.ej. "Sara"
 
-# ===== Helpers mínimos (reusarás tu bot JSON ya cargado en main.py) =====
+# ===== Helpers mínimos (reutiliza tu bot JSON ya cargado en main.py) =====
 def _apply_style(bot_cfg: dict, text: str) -> str:
     style = (bot_cfg or {}).get("style", {}) or {}
     short = bool(style.get("short_replies", True))
@@ -29,34 +29,35 @@ def _apply_style(bot_cfg: dict, text: str) -> str:
         text = " ".join(parts[:max_sents]).strip()
     return text
 
-def _get_inh_bot_cfg():
+def _get_ig_bot_cfg():
     """
-    Busca el bot de In Houston Texas.
-    Estrategia:
-      1) Si en bots/*.json existe un bot cuyo business_name contenga 'Houston' o name 'Sara', úsalo.
-      2) Si hay un único bot, úsalo.
-      3) fallback: primero.
+    Devuelve el bot a usar para Instagram.
+    1) Si se definió META_IG_BOT_NAME, lo busca por name exacto.
+    2) Si no, intenta heurística por business_name/name.
+    3) Si falla, usa el primero.
     """
     bots_config = current_app.config.get("BOTS_CONFIG") or {}
     if not bots_config:
         return None
 
-    # 1) Buscar por business_name o name
+    # 1) Forzar por nombre si viene por env (exacto, case-insensitive)
+    if IG_BOT_NAME:
+        for _key, cfg in bots_config.items():
+            if (cfg.get("name") or "").strip().lower() == IG_BOT_NAME.strip().lower():
+                return cfg
+
+    # 2) Heurística previa (compatibilidad)
     for _key, cfg in bots_config.items():
         name = (cfg.get("name") or "").lower()
         biz  = (cfg.get("business_name") or "").lower()
         if "houston" in biz or name in ("sara", "inh", "in houston texas"):
             return cfg
 
-    # 2) Si solo hay uno
-    if len(bots_config) == 1:
-        return list(bots_config.values())[0]
-
     # 3) fallback: primero
     return list(bots_config.values())[0]
 
 def _append_historial(bot_nombre: str, user_id: str, tipo: str, texto: str):
-    """Usa las funciones de Firebase ya cargadas en main.py mediante current_app."""
+    """Usa la función de Firebase expuesta por main.py mediante current_app."""
     try:
         fb_append = current_app.config.get("FB_APPEND_HISTORIAL")
         if callable(fb_append):
@@ -65,10 +66,9 @@ def _append_historial(bot_nombre: str, user_id: str, tipo: str, texto: str):
     except Exception as e:
         print(f"[IG] No se pudo guardar historial: {e}")
 
-def _gpt_reply(messages, model_name: str, temperature: float):
+def _gpt_reply(messages, model_name: str, temperature: float) -> str:
     """
-    Llama al cliente OpenAI ya creado en main.py.
-    Espera que current_app.config['OPENAI_CLIENT'] exista.
+    Llama al cliente OpenAI ya creado en main.py (current_app.config['OPENAI_CLIENT']).
     """
     try:
         client = current_app.config.get("OPENAI_CLIENT")
@@ -86,7 +86,7 @@ def _gpt_reply(messages, model_name: str, temperature: float):
         print(f"[IG] Error OpenAI: {e}")
         return "Estoy teniendo un problema técnico. Intentémoslo de nuevo."
 
-def _send_ig_text(psid: str, text: str):
+def _send_ig_text(psid: str, text: str) -> bool:
     """
     Envía un mensaje de texto al usuario IG (psid) mediante Graph API.
     Para Instagram se usa: POST /{IG_USER_ID}/messages
@@ -145,48 +145,64 @@ def ig_events():
         ]}]
     }
     """
+    # 0) Validaciones básicas de entorno
+    if not META_PAGE_ACCESS_TOKEN or not IG_USER_ID:
+        print("[IG] Faltan variables de entorno: META_PAGE_ACCESS_TOKEN o META_IG_USER_ID.")
+        return jsonify({"status": "env-missing"}), 200
+
     body = request.get_json(silent=True) or {}
     if body.get("object") != "instagram":
         return jsonify({"status": "ignored"}), 200
 
-    bot_cfg = _get_inh_bot_cfg()
+    bot_cfg = _get_ig_bot_cfg()
     if not bot_cfg:
-        print("[IG] No hay bot JSON cargado. Revisa bots/*.json")
+        print("[IG] No hay bot JSON cargado. Revisa bots/*.json y app.config['BOTS_CONFIG'].")
         return jsonify({"status": "no-bot"}), 200
 
     # Prepara contexto para GPT (similar a tu WhatsApp)
     system_prompt = (bot_cfg.get("system_prompt") or "").strip()
-    model_name = (bot_cfg.get("model") or "gpt-4o").strip()
-    temperature = float(bot_cfg.get("temperature", 0.6)) if isinstance(bot_cfg.get("temperature", None), (int, float)) else 0.6
+    model_name    = (bot_cfg.get("model") or "gpt-4o").strip()
+    temperature   = float(bot_cfg.get("temperature", 0.6)) if isinstance(bot_cfg.get("temperature", None), (int, float)) else 0.6
 
     for entry in body.get("entry", []):
-        page_id = (entry or {}).get("id")  # <- NECESARIO para /{PAGE_ID}/messages
-        for msg in entry.get("messaging", []):
-            psid = (msg.get("sender", {}) or {}).get("id")
-            message = msg.get("message", {}) or {}
-            text = (message.get("text") or "").strip()
+        # page_id = (entry or {}).get("id")  # No lo necesitamos para IG; enviamos por /{IG_USER_ID}/messages
+        for msg in (entry.get("messaging") or []):
+            psid    = ((msg.get("sender") or {}).get("id") or "").strip()
+            message = (msg.get("message") or {}) or {}
 
+            # Evitar responder a nuestros propios envíos
+            if message.get("is_echo"):
+                continue
+
+            text = (message.get("text") or "").strip()
             if not psid:
                 continue
 
-            if text:
-                # Guarda llegada
-                _append_historial(bot_cfg.get("name", "INH"), psid, "user", text)
+            # Si no hay texto (p.ej., adjuntos), responde con un fallback corto
+            if not text:
+                fallback = "Recibí tu mensaje. ¿Podrías escribirlo en texto para ayudarte mejor?"
+                _send_ig_text(psid, fallback)
+                _append_historial(bot_cfg.get("name", "INH"), psid, "bot", fallback)
+                continue
 
-                # Construye prompt
-                messages = []
-                if system_prompt:
-                    messages.append({"role": "system", "content": system_prompt})
-                messages.append({"role": "user", "content": text})
+            # Guarda llegada
+            _append_historial(bot_cfg.get("name", "INH"), psid, "user", text)
 
-                reply = _gpt_reply(messages, model_name=model_name, temperature=temperature)
-                reply = _apply_style(bot_cfg, reply) or "Gracias por escribirnos."
+            # Construye prompt
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": text})
 
-                # Envía respuesta (usa page_id correcto)
-                sent = _send_ig_text(psid, reply)
+            # Llama a GPT
+            reply = _gpt_reply(messages, model_name=model_name, temperature=temperature)
+            reply = _apply_style(bot_cfg, reply) or "Gracias por escribirnos."
 
-                # Guarda salida
-                if sent:
-                    _append_historial(bot_cfg.get("name", "INH"), psid, "bot", reply)
+            # Envía respuesta
+            sent = _send_ig_text(psid, reply)
+
+            # Guarda salida si se envió
+            if sent:
+                _append_historial(bot_cfg.get("name", "INH"), psid, "bot", reply)
 
     return jsonify({"status": "ok"}), 200
