@@ -15,6 +15,7 @@ ig_bp = Blueprint("instagram_webhook", __name__)
 # ===== Variables de entorno necesarias (Render -> Environment) =====
 META_VERIFY_TOKEN = (os.getenv("META_VERIFY_TOKEN") or "").strip()
 META_PAGE_ACCESS_TOKEN = (os.getenv("META_PAGE_ACCESS_TOKEN") or "").strip()
+IG_USER_ID = (os.getenv("META_IG_USER_ID") or "").strip()
 
 # ===== Helpers mínimos (reusarás tu bot JSON ya cargado en main.py) =====
 def _apply_style(bot_cfg: dict, text: str) -> str:
@@ -85,21 +86,23 @@ def _gpt_reply(messages, model_name: str, temperature: float):
         print(f"[IG] Error OpenAI: {e}")
         return "Estoy teniendo un problema técnico. Intentémoslo de nuevo."
 
-def _send_ig_text(psid: str, text: str, page_id: str) -> bool:
+def _send_ig_text(psid: str, text: str):
     """
     Envía un mensaje de texto al usuario IG (psid) mediante Graph API.
-    IMPORTANTE: Para Instagram se debe usar /{PAGE_ID}/messages (no /me/messages).
+    Para Instagram se usa: POST /{IG_USER_ID}/messages
     """
     if not META_PAGE_ACCESS_TOKEN:
         print("[IG] META_PAGE_ACCESS_TOKEN vacío. Configúralo en Render.")
         return False
-
-    if not page_id:
-        print("[IG] page_id vacío en webhook; no se puede responder.")
+    if not IG_USER_ID:
+        print("[IG] META_IG_USER_ID vacío. Configúralo en Render.")
         return False
 
-    url = f"https://graph.facebook.com/v21.0/{page_id}/messages"
-    payload = {"recipient": {"id": psid}, "message": {"text": text}}
+    url = f"https://graph.facebook.com/v21.0/{IG_USER_ID}/messages"
+    payload = {
+        "recipient": {"id": psid},
+        "message": {"text": text}
+    }
     params = {"access_token": META_PAGE_ACCESS_TOKEN}
 
     try:
