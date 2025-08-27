@@ -1,5 +1,12 @@
-# routes/instagram_webhook.py
+# instagram_webhook.py
 # Webhook de Instagram (Flask Blueprint) - aislado del resto del core
+# ENVÍA respuestas por:  POST /{PAGE_ID}/messages  (NO por IG_USER_ID)
+# Requiere en Render → Environment:
+#   META_VERIFY_TOKEN        = <tu verify token>
+#   META_PAGE_ACCESS_TOKEN   = <PAGE TOKEN de /me/accounts con scopes IG messaging>
+#   META_PAGE_ID             = 131837286675681        (tu Page ID)
+#   META_IG_USER_ID          = 17841460637585682      (connected_instagram_account.id) [opcional]
+#   META_IG_BOT_NAME         = Sara                   [opcional]
 
 import os
 import re
@@ -15,13 +22,14 @@ logging.basicConfig(level=logging.INFO)
 # ===== Blueprint =====
 ig_bp = Blueprint("instagram_webhook", __name__)
 
-# ===== Variables de entorno necesarias (Render -> Environment) =====
+# ===== Variables de entorno (Render -> Environment) =====
 META_VERIFY_TOKEN       = (os.getenv("META_VERIFY_TOKEN") or "").strip()
-META_PAGE_ACCESS_TOKEN  = (os.getenv("META_PAGE_ACCESS_TOKEN") or "").strip()     # Page Token (EAADZB...)
-IG_USER_ID              = (os.getenv("META_IG_USER_ID") or "").strip()            # p.ej. 17841460637585682 (connected_instagram_account.id)
-IG_BOT_NAME             = (os.getenv("META_IG_BOT_NAME") or "").strip()           # opcional: p.ej. "Sara"
+META_PAGE_ACCESS_TOKEN  = (os.getenv("META_PAGE_ACCESS_TOKEN") or "").strip()   # Page Token (EAADZB...)
+META_PAGE_ID            = (os.getenv("META_PAGE_ID") or "").strip()            # 131837286675681
+IG_USER_ID              = (os.getenv("META_IG_USER_ID") or "").strip()         # 17841460637585682 (opcional)
+IG_BOT_NAME             = (os.getenv("META_IG_BOT_NAME") or "").strip()        # p.ej. "Sara" (opcional)
 
-# ===== Helpers mínimos (reutiliza tu bot JSON ya cargado en main.py) =====
+# ===== Helpers (reutiliza tu bot JSON ya cargado en main.py) =====
 def _apply_style(bot_cfg: dict, text: str) -> str:
     style = (bot_cfg or {}).get("style", {}) or {}
     short = bool(style.get("short_replies", True))
@@ -36,28 +44,25 @@ def _apply_style(bot_cfg: dict, text: str) -> str:
 def _get_ig_bot_cfg():
     """
     Devuelve el bot a usar para Instagram.
-    1) Si se definió META_IG_BOT_NAME, lo busca por name exacto.
-    2) Si no, intenta heurística por business_name/name.
-    3) Si falla, usa el primero.
+    1) Si META_IG_BOT_NAME está definida, lo busca por name exacto (case-insensitive).
+    2) Si no, usa heurística por business_name/name.
+    3) Fallback: el primero del dict.
     """
     bots_config = current_app.config.get("BOTS_CONFIG") or {}
     if not bots_config:
         return None
 
-    # 1) Forzar por nombre si viene por env (exacto, case-insensitive)
     if IG_BOT_NAME:
         for _key, cfg in bots_config.items():
             if (cfg.get("name") or "").strip().lower() == IG_BOT_NAME.strip().lower():
                 return cfg
 
-    # 2) Heurística previa (compatibilidad)
     for _key, cfg in bots_config.items():
         name = (cfg.get("name") or "").lower()
         biz  = (cfg.get("business_name") or "").lower()
         if "houston" in biz or name in ("sara", "inh", "in houston texas"):
             return cfg
 
-    # 3) fallback: primero
     return list(bots_config.values())[0]
 
 def _append_historial(bot_nombre: str, user_id: str, tipo: str, texto: str):
@@ -93,19 +98,19 @@ def _gpt_reply(messages, model_name: str, temperature: float) -> str:
 def _send_ig_text(psid: str, text: str) -> bool:
     """
     Envía un mensaje de texto al usuario IG (psid) mediante Graph API.
-    Para Instagram se puede usar: POST /{IG_USER_ID}/messages con Page Token.
+    IMPORTANTE: Usar endpoint de PÁGINA:  POST /{PAGE_ID}/messages
     """
     if not META_PAGE_ACCESS_TOKEN:
         logging.error("[IG] META_PAGE_ACCESS_TOKEN vacío. Configúralo en Render.")
         return False
-    if not IG_USER_ID:
-        logging.error("[IG] META_IG_USER_ID vacío. Configúralo en Render.")
+    if not META_PAGE_ID:
+        logging.error("[IG] META_PAGE_ID vacío. Configúralo en Render.")
         return False
 
-    url = f"https://graph.facebook.com/v21.0/{IG_USER_ID}/messages"
+    url = f"https://graph.facebook.com/v21.0/{META_PAGE_ID}/messages"
     payload = {
         "recipient": {"id": psid},
-        "message": {"text": text[:1000] or "Gracias por escribirnos."}
+        "message": {"text": (text or "Gracias por escribirnos.")[:1000]}
     }
     params = {"access_token": META_PAGE_ACCESS_TOKEN}
 
@@ -116,9 +121,7 @@ def _send_ig_text(psid: str, text: str) -> bool:
         except Exception:
             j = {"_non_json": r.text}
         logging.info("[IG] SEND status=%s resp=%s", r.status_code, j)
-        if r.status_code >= 400:
-            return False
-        return True
+        return r.status_code < 400
     except Exception as e:
         logging.error("[IG] Excepción enviando mensaje: %s", e)
         return False
@@ -143,18 +146,18 @@ def ig_verify():
 def ig_events():
     """
     Soporta ambos formatos:
-    A) Nuevo (recomendado por webhooks): entry[].changes[].value.messaging[]
-    B) Legacy: entry[].messaging[]
+    A) entry[].changes[].value.messaging[]   (frecuente en IG vía Webhooks)
+    B) entry[].messaging[]                   (legacy/otras integraciones)
     """
-    if not META_PAGE_ACCESS_TOKEN or not IG_USER_ID:
-        logging.error("[IG] Faltan variables de entorno: META_PAGE_ACCESS_TOKEN o META_IG_USER_ID.")
+    if not META_PAGE_ACCESS_TOKEN or not META_PAGE_ID:
+        logging.error("[IG] Faltan variables de entorno: META_PAGE_ACCESS_TOKEN o META_PAGE_ID.")
         return jsonify({"status": "env-missing"}), 200
 
     body = request.get_json(silent=True) or {}
     logging.info("WEBHOOK IG RAW: %s", json.dumps(body, ensure_ascii=False))
 
+    # IG a veces llega con object:"instagram", a veces "page" con value.source IG
     if body.get("object") not in ("instagram", "page"):
-        # Algunos payloads vienen con object:"page" pero con IG en value.source
         logging.info("[IG] object no es instagram/page -> %s", body.get("object"))
         return jsonify({"status": "ignored"}), 200
 
@@ -181,6 +184,7 @@ def ig_events():
 
                 msg = (ev.get("message") or {}) or {}
                 if msg.get("is_echo"):
+                    # Eco (nuestro propio mensaje). No responder.
                     continue
                 text = (msg.get("text") or "").strip()
 
@@ -203,7 +207,7 @@ def ig_events():
                 _append_historial(bot_cfg.get("name", "INH"), psid, "bot", reply)
 
         # ----- B) Formato legacy con 'messaging' directo en entry -----
-        for ev in (entry.get("messaging") or []) :
+        for ev in (entry.get("messaging") or []):
             psid = ((ev.get("sender") or {}).get("id") or "").strip()
             if not psid:
                 continue
