@@ -1,9 +1,11 @@
 # instagram_webhook.py
-# IG Webhook: replica el pipeline de WhatsApp con detección de link y uso de URLs del JSON
+# IG Webhook: replica el pipeline de WhatsApp con detección de link, uso de URLs del JSON
+# y ahora respeta el switch ON/OFF desde WordPress (REST) con caché.
 
 import os
 import re
 import json
+import time
 import logging
 from datetime import datetime
 from collections import deque, defaultdict
@@ -17,6 +19,13 @@ ig_bp = Blueprint("instagram_webhook", __name__)
 META_VERIFY_TOKEN      = (os.getenv("META_VERIFY_TOKEN") or "").strip()
 META_PAGE_ACCESS_TOKEN = (os.getenv("META_PAGE_ACCESS_TOKEN") or "").strip()
 META_PAGE_ID           = (os.getenv("META_PAGE_ID") or "").strip()
+
+# NUEVO: URL del estado ON/OFF publicada por WordPress (p.ej. https://tu-wp.com/wp-json/inh/v1/ig-bot-status?token=SECRETO)
+# TTL: segundos que guardamos en caché el estado para no golpear WP en cada mensaje.
+WP_IG_STATUS_URL = (os.getenv("WP_IG_STATUS_URL") or "").strip()
+IG_STATUS_TTL    = int(os.getenv("IG_STATUS_TTL", "20"))       # 20s por defecto
+# Valor por defecto si no hay URL o falla la consulta (preferimos ON para no cortar servicio por error puntual)
+IG_STATUS_DEFAULT_ON = (os.getenv("IG_STATUS_DEFAULT", "on").lower() in ("1","true","on","yes"))
 
 # ===== Anti-duplicados =====
 _SEEN_MIDS = deque(maxlen=1000)
@@ -100,7 +109,6 @@ def _effective_booking_url(bot_cfg: dict) -> str:
         val = _drill_get(bot_cfg or {}, p)
         val = (val or "").strip() if isinstance(val, str) else ""
         if _valid_url(val): return val
-    # fallback desde entorno (opcional, expuesto por main.py)
     env_fallback = (os.environ.get("BOOKING_URL") or "").strip()
     return env_fallback if _valid_url(env_fallback) else ""
 
@@ -151,8 +159,44 @@ def _gpt_reply(messages, model_name: str, temperature: float) -> str:
         logging.error("[IG] Error OpenAI: %s", e)
         return "Estoy teniendo un problema técnico. Intentémoslo de nuevo."
 
+# ===== NUEVO: Estado ON/OFF desde WordPress =====
+_IG_STATUS_CACHE = {"ok": IG_STATUS_DEFAULT_ON, "ts": 0.0}
+
+def _ig_is_enabled() -> bool:
+    """
+    Devuelve True si el bot debe responder.
+    - Si hay WP_IG_STATUS_URL, consulta (con TTL).
+    - Si falla WP o no hay URL, usa IG_STATUS_DEFAULT (por defecto ON).
+    """
+    now = time.time()
+    if WP_IG_STATUS_URL and (now - _IG_STATUS_CACHE["ts"] < IG_STATUS_TTL):
+        return _IG_STATUS_CACHE["ok"]
+
+    if not WP_IG_STATUS_URL:
+        _IG_STATUS_CACHE.update({"ok": IG_STATUS_DEFAULT_ON, "ts": now})
+        return IG_STATUS_DEFAULT_ON
+
+    try:
+        r = requests.get(WP_IG_STATUS_URL, timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            ok = bool(data.get("enabled", True))
+        else:
+            logging.warning("[IG] Estado WP HTTP %s — usando default=%s", r.status_code, IG_STATUS_DEFAULT_ON)
+            ok = IG_STATUS_DEFAULT_ON
+        _IG_STATUS_CACHE.update({"ok": ok, "ts": now})
+        return ok
+    except Exception as e:
+        logging.warning("[IG] No se pudo leer estado desde WP: %s — usando default=%s", e, IG_STATUS_DEFAULT_ON)
+        _IG_STATUS_CACHE.update({"ok": IG_STATUS_DEFAULT_ON, "ts": now})
+        return IG_STATUS_DEFAULT_ON
+
 # ===== Envío IG =====
 def _send_ig_text(psid: str, text: str) -> bool:
+    # Respeta el switch también en envíos
+    if not _ig_is_enabled():
+        logging.info("[IG] Bloqueado envío: bot OFF (panel WP).")
+        return False
     if not META_PAGE_ACCESS_TOKEN or not META_PAGE_ID:
         logging.error("[IG] Faltan META_PAGE_ACCESS_TOKEN o META_PAGE_ID")
         return False
@@ -172,12 +216,10 @@ def _send_ig_text(psid: str, text: str) -> bool:
 _MD_LINK = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 def _ensure_plain_url(text: str) -> str:
     if not text: return text
-    # Si trae [texto](url) -> reemplazar por "texto: url"
     def _rep(m):
         label = m.group(1).strip()
         url = m.group(2).strip()
         if not label: return url
-        # Evitar duplicar si ya está el URL fuera
         return f"{label}: {url}"
     text = _MD_LINK.sub(_rep, text)
     return text
@@ -192,9 +234,26 @@ def ig_verify():
         return challenge, 200
     return "Token inválido", 403
 
+# ===== Endpoint de debug del estado (útil para pruebas) =====
+@ig_bp.route("/ig_status", methods=["GET"])
+def ig_status():
+    # muestra el estado actual que usará el webhook
+    left = max(0, IG_STATUS_TTL - (time.time() - _IG_STATUS_CACHE["ts"]))
+    return jsonify({
+        "enabled": _ig_is_enabled(),
+        "cache_seconds_remaining": round(left, 1),
+        "wp_url_configured": bool(WP_IG_STATUS_URL),
+        "default_on_if_wp_fails": IG_STATUS_DEFAULT_ON
+    }), 200
+
 # ===== Eventos =====
 @ig_bp.route("/webhook_instagram", methods=["POST"])
 def ig_events():
+    # 1) Respeta el switch del panel — si está OFF, ignoramos el mensaje
+    if not _ig_is_enabled():
+        logging.info("[IG] Bot OFF por panel WP — ignorando mensaje entrante.")
+        return jsonify({"status":"disabled"}), 200
+
     if not META_PAGE_ACCESS_TOKEN or not META_PAGE_ID:
         logging.error("[IG] Faltan variables: META_PAGE_ACCESS_TOKEN o META_PAGE_ID.")
         return jsonify({"status":"env-missing"}), 200
@@ -247,6 +306,11 @@ def ig_events():
         # 3) Flujo normal con GPT
         IG_SESSION_HISTORY[clave].append({"role":"user","content":text})
         _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "user", text)
+
+        # Aquí podría volver a estar OFF por cambio en caliente; revalida justo antes de llamar GPT
+        if not _ig_is_enabled():
+            logging.info("[IG] Bot OFF tras revalidar — no se genera respuesta.")
+            return
 
         respuesta = _gpt_reply(IG_SESSION_HISTORY[clave], model_name, temperature)
         respuesta = _ensure_plain_url(respuesta)    # quita markdown para que se vea el link
