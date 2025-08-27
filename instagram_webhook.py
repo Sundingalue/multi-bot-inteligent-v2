@@ -1,25 +1,26 @@
 # instagram_webhook.py
-# IG Webhook simple: usa SOLO lo definido en el JSON (system_prompt, greeting, model, temperature)
+# IG Webhook: replica el pipeline de WhatsApp usando SOLO lo definido en el JSON
+# (system_prompt, greeting, model, temperature, style.*). Sin personalidad extra.
 
 import os
 import re
 import json
 import logging
 from datetime import datetime
-from collections import deque
+from collections import deque, defaultdict
 import requests
 from flask import Blueprint, request, jsonify, current_app
 
 logging.basicConfig(level=logging.INFO)
 ig_bp = Blueprint("instagram_webhook", __name__)
 
-# ===== Env =====
-META_VERIFY_TOKEN       = (os.getenv("META_VERIFY_TOKEN") or "").strip()
-META_PAGE_ACCESS_TOKEN  = (os.getenv("META_PAGE_ACCESS_TOKEN") or "").strip()
-META_PAGE_ID            = (os.getenv("META_PAGE_ID") or "").strip()
+# ====== Entorno requerido ======
+META_VERIFY_TOKEN      = (os.getenv("META_VERIFY_TOKEN") or "").strip()
+META_PAGE_ACCESS_TOKEN = (os.getenv("META_PAGE_ACCESS_TOKEN") or "").strip()
+META_PAGE_ID           = (os.getenv("META_PAGE_ID") or "").strip()  # Page ID (no IG user id)
 
-# ===== Anti-duplicados por mid =====
-_SEEN_MIDS = deque(maxlen=500)
+# ====== Anti-duplicados por mid ======
+_SEEN_MIDS = deque(maxlen=1000)
 _SEEN_SET  = set()
 def _seen_mid(mid: str) -> bool:
     if not mid:
@@ -33,51 +34,100 @@ def _seen_mid(mid: str) -> bool:
         _SEEN_SET.discard(viejo)
     return False
 
-# ===== Anti-repetición de greeting =====
-_SEEN_USERS = set()
-def _first_time_user(psid: str) -> bool:
-    if not psid:
-        return False
-    if psid in _SEEN_USERS:
-        return False
-    _SEEN_USERS.add(psid)
-    return True
+# ====== Estado de sesión para IG (en memoria, como WA) ======
+IG_SESSION_HISTORY = defaultdict(list)  # clave -> [{"role":..., "content":...}]
+IG_GREETED         = set()              # clave -> saludado una vez
 
-# ===== Helpers =====
-def _style_clip(text: str, bot_cfg: dict) -> str:
-    """Aplica estilo básico (máx 2 frases y 220 chars)"""
+def _clave_sesion(page_id: str, psid: str) -> str:
+    return f"ig:{page_id}|{psid}"
+
+# ====== Utilidades de estilo, iguales a WA ======
+def _split_sentences(text: str):
+    parts = re.split(r'(?<=[\.\!\?])\s+', (text or "").strip())
+    if len(parts) == 1 and len(text or "") > 280:
+        parts = [text[:200].strip(), text[200:].strip()]
+    return [p for p in parts if p]
+
+def _apply_style(bot_cfg: dict, text: str) -> str:
+    style = (bot_cfg or {}).get("style", {}) or {}
+    short = bool(style.get("short_replies", True))
+    max_sents = int(style.get("max_sentences", 2)) if style.get("max_sentences") is not None else 2
     if not text:
         return text
-    style = (bot_cfg.get("style") or {})
-    max_sent = int(style.get("max_sentences", 2)) if style.get("max_sentences") is not None else 2
-    max_chars = int(style.get("max_chars", 220)) if style.get("max_chars") is not None else 220
-    txt = re.sub(r"\s+", " ", text).strip()
-    sents = re.split(r'(?<=[.!?])\s+', txt)
-    txt = " ".join(sents[:max_sent]).strip()
-    if len(txt) > max_chars:
-        txt = txt[:max_chars]
-        txt = re.sub(r"\s+\S*$", "", txt).rstrip(" ,;:") + "…"
-    return txt
+    if short:
+        sents = _split_sentences(text)
+        text = " ".join(sents[:max_sents]).strip()
+    return text
 
-def _get_bot_cfg(page_id: str):
-    """Busca en BOTS_CONFIG el bot por page_id (Instagram)"""
+def _next_probe_from_bot(bot_cfg: dict) -> str:
+    style = (bot_cfg or {}).get("style", {}) or {}
+    probes = style.get("probes") or []
+    probes = [p.strip() for p in probes if isinstance(p, str) and p.strip()]
+    if not probes:
+        return ""
+    import random
+    return random.choice(probes)
+
+def _ensure_question(bot_cfg: dict, text: str, force_question: bool) -> str:
+    txt = re.sub(r"\s+", " ", (text or "")).strip()
+    if not force_question:
+        return txt
+    if "?" in txt:
+        return txt
+    if not txt.endswith((".", "!", "…")):
+        txt += "."
+    probe = _next_probe_from_bot(bot_cfg)
+    return f"{txt} {probe}".strip() if probe else txt
+
+# ====== Bot config lookup ======
+def _get_bot_cfg_for_page(page_id: str) -> dict:
+    """
+    Busca dentro de app.config['BOTS_CONFIG'] un bot cuyo canal instagram tenga page_id.
+    Estructura esperada en bots JSON:
+      "channels": { "instagram": { "page_id": "1318...", "intro_keywords": [...] } }
+    Si no hay match, devuelve el primero.
+    """
     bots = current_app.config.get("BOTS_CONFIG") or {}
+    # 1) Match por page_id en canales.instagram
     for _, cfg in bots.items():
         ch = (cfg.get("channels") or {}).get("instagram") or {}
         if (ch.get("page_id") or "").strip() == (page_id or "").strip():
             return cfg
-    # fallback: primero
+    # 2) Fallback por META_PAGE_ID
+    for _, cfg in bots.items():
+        ch = (cfg.get("channels") or {}).get("instagram") or {}
+        if (ch.get("page_id") or "").strip() == (META_PAGE_ID or "").strip():
+            return cfg
+    # 3) Fallback genérico: primero
     return list(bots.values())[0] if bots else {}
 
+# ====== Firebase (append) ======
 def _append_historial(bot_nombre: str, user_id: str, tipo: str, texto: str):
     try:
         fb_append = current_app.config.get("FB_APPEND_HISTORIAL")
         if callable(fb_append):
             ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            fb_append(bot_nombre, f"ig:{user_id}", {"tipo": tipo, "texto": texto, "hora": ahora})
+            fb_append(bot_nombre, user_id, {"tipo": tipo, "texto": texto, "hora": ahora})
     except Exception as e:
         logging.warning("[IG] No se pudo guardar historial: %s", e)
 
+# ====== OpenAI ======
+def _gpt_reply(messages, model_name: str, temperature: float) -> str:
+    try:
+        client = current_app.config.get("OPENAI_CLIENT")
+        if client is None:
+            return "¿En qué puedo ayudarte?"
+        completion = client.chat.completions.create(
+            model=model_name,
+            temperature=temperature,
+            messages=messages
+        )
+        return (completion.choices[0].message.content or "").strip()
+    except Exception as e:
+        logging.error("[IG] Error OpenAI: %s", e)
+        return "Estoy teniendo un problema técnico. Intentémoslo de nuevo."
+
+# ====== Envío IG ======
 def _send_ig_text(psid: str, text: str) -> bool:
     if not META_PAGE_ACCESS_TOKEN or not META_PAGE_ID:
         logging.error("[IG] Faltan META_PAGE_ACCESS_TOKEN o META_PAGE_ID")
@@ -99,26 +149,7 @@ def _send_ig_text(psid: str, text: str) -> bool:
         logging.error("[IG] Excepción enviando mensaje: %s", e)
         return False
 
-def _gpt_reply(system_prompt: str, user_text: str, model: str, temperature: float) -> str:
-    try:
-        client = current_app.config.get("OPENAI_CLIENT")
-        if not client:
-            return "¿En qué puedo ayudarte?"
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": user_text})
-        c = client.chat.completions.create(
-            model=model,
-            temperature=temperature,
-            messages=messages
-        )
-        return (c.choices[0].message.content or "").strip()
-    except Exception as e:
-        logging.error("[IG] Error OpenAI: %s", e)
-        return "Tuve un problema técnico. Intentemos de nuevo."
-
-# ===== Verify =====
+# ====== Verificación (GET) ======
 @ig_bp.route("/webhook_instagram", methods=["GET"])
 def ig_verify():
     mode = request.args.get("hub.mode")
@@ -128,79 +159,114 @@ def ig_verify():
         return challenge, 200
     return "Token inválido", 403
 
-# ===== Events =====
+# ====== Eventos (POST) ======
 @ig_bp.route("/webhook_instagram", methods=["POST"])
 def ig_events():
     if not META_PAGE_ACCESS_TOKEN or not META_PAGE_ID:
-        logging.error("[IG] Faltan variables: META_PAGE_ACCESS_TOKEN o META_PAGE_ID.")
+        logging.error("[IG] Faltan variables de entorno: META_PAGE_ACCESS_TOKEN o META_PAGE_ID.")
         return jsonify({"status": "env-missing"}), 200
 
     body = request.get_json(silent=True) or {}
     logging.info("WEBHOOK IG RAW: %s", json.dumps(body, ensure_ascii=False))
+
     if body.get("object") not in ("instagram", "page"):
         return jsonify({"status": "ignored"}), 200
 
     senders = []
 
-    for entry in body.get("entry", []):
-        page_id = entry.get("id") or META_PAGE_ID
-        bot_cfg = _get_bot_cfg(page_id)
+    def handle_one(page_id: str, psid: str, text: str, mid: str, is_echo: bool):
+        if not psid or not text:
+            return
+        if is_echo:
+            return
+        if _seen_mid(mid):
+            return
+
+        bot_cfg = _get_bot_cfg_for_page(page_id)
+        if not bot_cfg:
+            return
+
+        # Cargar parámetros del JSON
         system_prompt = (bot_cfg.get("system_prompt") or "").strip()
-        model = (bot_cfg.get("model") or "gpt-4o").strip()
-        temp = float(bot_cfg.get("temperature", 0.6)) if isinstance(bot_cfg.get("temperature", None), (int, float)) else 0.6
-        greeting = (bot_cfg.get("greeting") or "").strip()
+        model_name    = (bot_cfg.get("model") or "gpt-4o").strip()
+        temperature   = float(bot_cfg.get("temperature", 0.6)) if isinstance(bot_cfg.get("temperature", None), (int, float)) else 0.6
+        greeting      = (bot_cfg.get("greeting") or "").strip()
 
-        # --- Procesar SOLO una rama por evento ---
-        processed_changes = False
+        ch_ig = (bot_cfg.get("channels") or {}).get("instagram") or {}
+        intro_keywords = ch_ig.get("intro_keywords") or bot_cfg.get("intro_keywords") or [
+            "hola", "buenas", "buenos dias", "buenas tardes", "buenas noches"
+        ]
 
-        # changes.value.messaging (nuevo esquema)
+        clave = _clave_sesion(page_id, psid)
+        # Bootstrap de historial: system solo una vez
+        if not IG_SESSION_HISTORY.get(clave):
+            if system_prompt:
+                IG_SESSION_HISTORY[clave] = [{"role": "system", "content": system_prompt}]
+            else:
+                IG_SESSION_HISTORY[clave] = []
+
+        # Greeting UNA sola vez si coincide con intro keywords
+        low = text.lower()
+        if (clave not in IG_GREETED) and greeting and any(k in low for k in intro_keywords):
+            _send_ig_text(psid, _apply_style(bot_cfg, greeting))
+            IG_GREETED.add(clave)
+            _append_historial(bot_cfg.get("name", "BOT"), f"ig:{psid}", "bot", greeting)
+            # No devolvemos: sigue el flujo normal (como WA)
+
+        # Guardar llegada
+        IG_SESSION_HISTORY[clave].append({"role": "user", "content": text})
+        _append_historial(bot_cfg.get("name", "BOT"), f"ig:{psid}", "user", text)
+
+        # Llamar a GPT con el mismo pipeline de WA
+        respuesta = _gpt_reply(IG_SESSION_HISTORY[clave], model_name, temperature)
+        respuesta = _apply_style(bot_cfg, respuesta)
+
+        must_ask = bool((bot_cfg.get("style") or {}).get("always_question", False))
+        respuesta = _ensure_question(bot_cfg, respuesta, force_question=must_ask)
+
+        # Evitar repetición idéntica inmediata (igual que WA)
+        if IG_SESSION_HISTORY[clave] and len(IG_SESSION_HISTORY[clave]) >= 2:
+            last_assistant = None
+            for m in reversed(IG_SESSION_HISTORY[clave]):
+                if m["role"] == "assistant":
+                    last_assistant = m["content"]
+                    break
+            if last_assistant and last_assistant.strip() == respuesta.strip():
+                probe = _next_probe_from_bot(bot_cfg)
+                if probe and probe not in respuesta:
+                    if not respuesta.endswith((".", "!", "…", "¿", "?")):
+                        respuesta += "."
+                    respuesta = f"{respuesta} {probe}".strip()
+
+        # Enviar
+        _send_ig_text(psid, respuesta)
+        IG_SESSION_HISTORY[clave].append({"role": "assistant", "content": respuesta})
+        _append_historial(bot_cfg.get("name", "BOT"), f"ig:{psid}", "bot", respuesta)
+
+        senders.append(psid)
+
+    # ---- 1) Esquema nuevo: entry[].changes[].value.messaging[]
+    for entry in (body.get("entry") or []):
+        page_id = entry.get("id") or META_PAGE_ID
         for change in (entry.get("changes") or []):
-            processed_changes = True
             for ev in (change.get("value", {}).get("messaging") or []):
                 psid = ((ev.get("sender") or {}).get("id") or "").strip()
-                msg = (ev.get("message") or {})
-                mid = (msg.get("mid") or "").strip()
-                if not psid or _seen_mid(mid) or msg.get("is_echo"):
-                    continue
-                text = (msg.get("text") or "").strip()
-                if not text:
-                    continue
-                senders.append(psid)
+                msg  = (ev.get("message") or {}) or {}
+                mid  = (msg.get("mid") or "").strip()
+                txt  = (msg.get("text") or "").strip()
+                is_echo = bool(msg.get("is_echo"))
+                handle_one(page_id, psid, txt, mid, is_echo)
 
-                # Saludo SOLO la primera vez y NO invocar GPT en ese mensaje
-                if _first_time_user(psid) and greeting:
-                    _send_ig_text(psid, _style_clip(greeting, bot_cfg))
-                    _append_historial(bot_cfg.get("name", "INH"), psid, "bot", greeting)
-                    continue
-
-                _append_historial(bot_cfg.get("name", "INH"), psid, "user", text)
-                reply = _gpt_reply(system_prompt, text, model, temp)
-                _send_ig_text(psid, _style_clip(reply, bot_cfg))
-                _append_historial(bot_cfg.get("name", "INH"), psid, "bot", reply)
-
-        # entry.messaging (legacy) — sólo si no hubo changes
-        if not processed_changes:
-            for ev in (entry.get("messaging") or []):
-                psid = ((ev.get("sender") or {}).get("id") or "").strip()
-                msg = (ev.get("message") or {})
-                mid = (msg.get("mid") or "").strip()
-                if not psid or _seen_mid(mid) or msg.get("is_echo"):
-                    continue
-                text = (msg.get("text") or "").strip()
-                if not text:
-                    continue
-                senders.append(psid)
-
-                # Saludo SOLO la primera vez y NO invocar GPT en ese mensaje
-                if _first_time_user(psid) and greeting:
-                    _send_ig_text(psid, _style_clip(greeting, bot_cfg))
-                    _append_historial(bot_cfg.get("name", "INH"), psid, "bot", greeting)
-                    continue
-
-                _append_historial(bot_cfg.get("name", "INH"), psid, "user", text)
-                reply = _gpt_reply(system_prompt, text, model, temp)
-                _send_ig_text(psid, _style_clip(reply, bot_cfg))
-                _append_historial(bot_cfg.get("name", "INH"), psid, "bot", reply)
+    # ---- 2) Esquema legacy: entry[].messaging[]
+    for entry in (body.get("entry") or []):
+        page_id = entry.get("id") or META_PAGE_ID
+        for ev in (entry.get("messaging") or []):
+            psid = ((ev.get("sender") or {}).get("id") or "").strip()
+            msg  = (ev.get("message") or {}) or {}
+            mid  = (msg.get("mid") or "").strip()
+            txt  = (msg.get("text") or "").strip()
+            is_echo = bool(msg.get("is_echo"))
+            handle_one(page_id, psid, txt, mid, is_echo)
 
     logging.info("WEBHOOK IG SENDER_IDS: %s", senders)
     return jsonify({"status": "ok", "senders": senders}), 200
