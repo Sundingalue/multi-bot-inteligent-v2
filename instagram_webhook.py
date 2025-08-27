@@ -183,7 +183,7 @@ def ig_events():
                 reply = _apply_style(bot_cfg, reply) or "Gracias por escribirnos."
 
                 # Envía respuesta (usa page_id correcto)
-                sent = _send_ig_text(psid, reply, page_id)
+                sent = _send_ig_text(psid, reply)
 
                 # Guarda salida
                 if sent:
