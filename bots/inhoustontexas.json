@@ -23,6 +23,16 @@
     "emails": ["info@inhoustontexas.us"],
     "contact": {
       "email": "info@inhoustontexas.us"
+    },
+
+    "channels": {
+      "instagram": {
+        "page_id": "131837286675681",
+        "ig_user_id": "17841460637585682"
+      },
+      "whatsapp": {
+        "number": "whatsapp:+13469882323"
+      }
     }
   }
 }
