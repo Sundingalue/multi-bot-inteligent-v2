@@ -44,7 +44,7 @@ def _clave_sesion(page_id: str, psid: str) -> str:
 
 # ===== Helpers estilo =====
 def _split_sentences(text: str):
-    parts = re.split(r'(?<=[\.\!\?])\s+', (text or "").strip())
+    parts = re.split(r'(?<=[\.!\?])\s+', (text or "").strip())
     if len(parts) == 1 and len(text or "") > 280:
         parts = [text[:200].strip(), text[200:].strip()]
     return [p for p in parts if p]
@@ -273,6 +273,8 @@ def ig_events():
             _send_ig_text(psid, _apply_style(bot_cfg, greeting))
             IG_GREETED.add(clave)
             _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", greeting)
+            senders.append(psid)
+            return
 
         if _wants_link(text):
             url = _effective_booking_url(bot_cfg)
