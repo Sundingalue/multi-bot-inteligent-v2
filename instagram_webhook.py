@@ -20,11 +20,8 @@ META_VERIFY_TOKEN      = (os.getenv("META_VERIFY_TOKEN") or "").strip()
 META_PAGE_ACCESS_TOKEN = (os.getenv("META_PAGE_ACCESS_TOKEN") or "").strip()
 META_PAGE_ID           = (os.getenv("META_PAGE_ID") or "").strip()
 
-# NUEVO: URL del estado ON/OFF publicada por WordPress (p.ej. https://tu-wp.com/wp-json/inh/v1/ig-bot-status?token=SECRETO)
-# TTL: segundos que guardamos en caché el estado para no golpear WP en cada mensaje.
 WP_IG_STATUS_URL = (os.getenv("WP_IG_STATUS_URL") or "").strip()
-IG_STATUS_TTL    = int(os.getenv("IG_STATUS_TTL", "20"))       # 20s por defecto
-# Valor por defecto si no hay URL o falla la consulta (preferimos ON para no cortar servicio por error puntual)
+IG_STATUS_TTL    = int(os.getenv("IG_STATUS_TTL", "20"))
 IG_STATUS_DEFAULT_ON = (os.getenv("IG_STATUS_DEFAULT", "on").lower() in ("1","true","on","yes"))
 
 # ===== Anti-duplicados =====
@@ -39,8 +36,8 @@ def _seen_mid(mid: str) -> bool:
     return False
 
 # ===== Estado de sesión IG (como WA) =====
-IG_SESSION_HISTORY = defaultdict(list)   # clave -> [{"role":..., "content":...}]
-IG_GREETED         = set()               # claves ya saludadas
+IG_SESSION_HISTORY = defaultdict(list)
+IG_GREETED         = set()
 
 def _clave_sesion(page_id: str, psid: str) -> str:
     return f"ig:{page_id}|{psid}"
@@ -59,7 +56,6 @@ def _apply_style(bot_cfg: dict, text: str) -> str:
     max_sents = int(style.get("max_sentences", 2)) if style.get("max_sentences") is not None else 2
     if not short:
         return text
-    # Si hay URLs, no recortar la oración del link
     has_url = bool(re.search(r"https?://\S+", text))
     if has_url:
         return text
@@ -159,23 +155,15 @@ def _gpt_reply(messages, model_name: str, temperature: float) -> str:
         logging.error("[IG] Error OpenAI: %s", e)
         return "Estoy teniendo un problema técnico. Intentémoslo de nuevo."
 
-# ===== NUEVO: Estado ON/OFF desde WordPress =====
+# ===== Estado ON/OFF desde WordPress =====
 _IG_STATUS_CACHE = {"ok": IG_STATUS_DEFAULT_ON, "ts": 0.0}
-
 def _ig_is_enabled() -> bool:
-    """
-    Devuelve True si el bot debe responder.
-    - Si hay WP_IG_STATUS_URL, consulta (con TTL).
-    - Si falla WP o no hay URL, usa IG_STATUS_DEFAULT (por defecto ON).
-    """
     now = time.time()
     if WP_IG_STATUS_URL and (now - _IG_STATUS_CACHE["ts"] < IG_STATUS_TTL):
         return _IG_STATUS_CACHE["ok"]
-
     if not WP_IG_STATUS_URL:
         _IG_STATUS_CACHE.update({"ok": IG_STATUS_DEFAULT_ON, "ts": now})
         return IG_STATUS_DEFAULT_ON
-
     try:
         r = requests.get(WP_IG_STATUS_URL, timeout=5)
         if r.status_code == 200:
@@ -193,7 +181,6 @@ def _ig_is_enabled() -> bool:
 
 # ===== Envío IG =====
 def _send_ig_text(psid: str, text: str) -> bool:
-    # Respeta el switch también en envíos
     if not _ig_is_enabled():
         logging.info("[IG] Bloqueado envío: bot OFF (panel WP).")
         return False
@@ -212,7 +199,7 @@ def _send_ig_text(psid: str, text: str) -> bool:
         logging.error("[IG] Excepción enviando mensaje: %s", e)
         return False
 
-# ===== Normaliza links de respuesta (quita Markdown) =====
+# ===== Normaliza links (quita Markdown) =====
 _MD_LINK = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 def _ensure_plain_url(text: str) -> str:
     if not text: return text
@@ -221,8 +208,7 @@ def _ensure_plain_url(text: str) -> str:
         url = m.group(2).strip()
         if not label: return url
         return f"{label}: {url}"
-    text = _MD_LINK.sub(_rep, text)
-    return text
+    return _MD_LINK.sub(_rep, text)
 
 # ===== Verificación =====
 @ig_bp.route("/webhook_instagram", methods=["GET"])
@@ -234,10 +220,9 @@ def ig_verify():
         return challenge, 200
     return "Token inválido", 403
 
-# ===== Endpoint de debug del estado (útil para pruebas) =====
+# ===== Estado de debug =====
 @ig_bp.route("/ig_status", methods=["GET"])
 def ig_status():
-    # muestra el estado actual que usará el webhook
     left = max(0, IG_STATUS_TTL - (time.time() - _IG_STATUS_CACHE["ts"]))
     return jsonify({
         "enabled": _ig_is_enabled(),
@@ -246,10 +231,9 @@ def ig_status():
         "default_on_if_wp_fails": IG_STATUS_DEFAULT_ON
     }), 200
 
-# ===== Eventos =====
+# ===== Eventos (unificado para evitar duplicación) =====
 @ig_bp.route("/webhook_instagram", methods=["POST"])
 def ig_events():
-    # 1) Respeta el switch del panel — si está OFF, ignoramos el mensaje
     if not _ig_is_enabled():
         logging.info("[IG] Bot OFF por panel WP — ignorando mensaje entrante.")
         return jsonify({"status":"disabled"}), 200
@@ -261,15 +245,15 @@ def ig_events():
     body = request.get_json(silent=True) or {}
     logging.info("WEBHOOK IG RAW: %s", json.dumps(body, ensure_ascii=False))
 
-    if body.get("object") not in ("instagram","page"):
+    if body.get("object") not in ("instagram", "page"):
         return jsonify({"status":"ignored"}), 200
 
     senders = []
+    procesados = set()
 
     def handle_one(page_id: str, psid: str, text: str, mid: str, is_echo: bool):
         if not psid or not text: return
         if is_echo or _seen_mid(mid): return
-
         bot_cfg = _get_bot_cfg_for_page(page_id)
         if not bot_cfg: return
 
@@ -285,14 +269,11 @@ def ig_events():
             IG_SESSION_HISTORY[clave] = [{"role":"system","content":system_prompt}] if system_prompt else []
 
         low = text.lower()
-
-        # 1) Greeting único si detecta saludo
         if (clave not in IG_GREETED) and greeting and any(k in low for k in intro_keywords):
             _send_ig_text(psid, _apply_style(bot_cfg, greeting))
             IG_GREETED.add(clave)
             _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", greeting)
 
-        # 2) Si piden link -> enviamos el booking_url del JSON (sin pasar por GPT)
         if _wants_link(text):
             url = _effective_booking_url(bot_cfg)
             if _valid_url(url):
@@ -303,23 +284,20 @@ def ig_events():
                 senders.append(psid)
                 return
 
-        # 3) Flujo normal con GPT
         IG_SESSION_HISTORY[clave].append({"role":"user","content":text})
         _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "user", text)
 
-        # Aquí podría volver a estar OFF por cambio en caliente; revalida justo antes de llamar GPT
         if not _ig_is_enabled():
             logging.info("[IG] Bot OFF tras revalidar — no se genera respuesta.")
             return
 
         respuesta = _gpt_reply(IG_SESSION_HISTORY[clave], model_name, temperature)
-        respuesta = _ensure_plain_url(respuesta)    # quita markdown para que se vea el link
+        respuesta = _ensure_plain_url(respuesta)
         respuesta = _apply_style(bot_cfg, respuesta)
 
         must_ask = bool((bot_cfg.get("style") or {}).get("always_question", False))
         respuesta = _ensure_question(bot_cfg, respuesta, force_question=must_ask)
 
-        # Evitar repetición idéntica inmediata
         if IG_SESSION_HISTORY[clave]:
             last_assistant = next((m["content"] for m in reversed(IG_SESSION_HISTORY[clave]) if m["role"]=="assistant"), "")
             if last_assistant and last_assistant.strip() == respuesta.strip():
@@ -334,25 +312,18 @@ def ig_events():
         _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", respuesta)
         senders.append(psid)
 
-    # Esquema nuevo
     for entry in (body.get("entry") or []):
         page_id = entry.get("id") or META_PAGE_ID
+        eventos = []
         for change in (entry.get("changes") or []):
-            for ev in (change.get("value",{}).get("messaging") or []):
-                psid = ((ev.get("sender") or {}).get("id") or "").strip()
-                msg  = (ev.get("message") or {}) or {}
-                mid  = (msg.get("mid") or "").strip()
-                txt  = (msg.get("text") or "").strip()
-                is_echo = bool(msg.get("is_echo"))
-                handle_one(page_id, psid, txt, mid, is_echo)
-
-    # Legacy
-    for entry in (body.get("entry") or []):
-        page_id = entry.get("id") or META_PAGE_ID
-        for ev in (entry.get("messaging") or []):
+            eventos.extend((change.get("value", {}) or {}).get("messaging") or [])
+        eventos.extend(entry.get("messaging") or [])
+        for ev in eventos:
             psid = ((ev.get("sender") or {}).get("id") or "").strip()
             msg  = (ev.get("message") or {}) or {}
             mid  = (msg.get("mid") or "").strip()
+            if mid in procesados: continue
+            procesados.add(mid)
             txt  = (msg.get("text") or "").strip()
             is_echo = bool(msg.get("is_echo"))
             handle_one(page_id, psid, txt, mid, is_echo)
