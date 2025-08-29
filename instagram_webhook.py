@@ -1,4 +1,3 @@
-# instagram_webhook.py
 # IG Webhook: replica el pipeline de WhatsApp con detección de link, uso de URLs del JSON
 # y ahora respeta el switch ON/OFF desde WordPress (REST) con caché.
 
@@ -163,19 +162,12 @@ def _gpt_reply(messages, model_name: str, temperature: float) -> str:
 _IG_STATUS_CACHE = {"ok": IG_STATUS_DEFAULT_ON, "ts": 0.0}
 
 def _ig_is_enabled() -> bool:
-    """
-    Devuelve True si el bot debe responder.
-    - Si hay WP_IG_STATUS_URL, consulta (con TTL).
-    - Si falla WP o no hay URL, usa IG_STATUS_DEFAULT (por defecto ON).
-    """
     now = time.time()
     if WP_IG_STATUS_URL and (now - _IG_STATUS_CACHE["ts"] < IG_STATUS_TTL):
         return _IG_STATUS_CACHE["ok"]
-
     if not WP_IG_STATUS_URL:
         _IG_STATUS_CACHE.update({"ok": IG_STATUS_DEFAULT_ON, "ts": now})
         return IG_STATUS_DEFAULT_ON
-
     try:
         r = requests.get(WP_IG_STATUS_URL, timeout=5)
         if r.status_code == 200:
@@ -193,17 +185,27 @@ def _ig_is_enabled() -> bool:
 
 # ===== Envío IG =====
 def _send_ig_text(psid: str, text: str) -> bool:
-    # Respeta el switch también en envíos
     if not _ig_is_enabled():
         logging.info("[IG] Bloqueado envío: bot OFF (panel WP).")
         return False
     if not META_PAGE_ACCESS_TOKEN or not META_PAGE_ID:
         logging.error("[IG] Faltan META_PAGE_ACCESS_TOKEN o META_PAGE_ID")
         return False
+
     url = f"https://graph.facebook.com/v21.0/{META_PAGE_ID}/messages"
-    payload = {"recipient": {"id": psid}, "message": {"text": (text or "Gracias por escribirnos.")[:1000]}}
+    payload = {
+        "recipient": {"id": psid},
+        "message": {"text": (text or "Gracias por escribirnos.")[:1000]}
+    }
+
+    # 🔹 Nuevo: usamos Authorization: Bearer en vez de query param
+    headers = {
+        "Authorization": f"Bearer {META_PAGE_ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
     try:
-        r = requests.post(url, params={"access_token": META_PAGE_ACCESS_TOKEN}, json=payload, timeout=20)
+        r = requests.post(url, headers=headers, json=payload, timeout=20)
         try: j = r.json()
         except Exception: j = {"_non_json": r.text}
         logging.info("[IG] SEND status=%s resp=%s", r.status_code, j)
