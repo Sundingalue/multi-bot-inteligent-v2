@@ -174,6 +174,8 @@ from instagram_webhook import ig_bp
 app.register_blueprint(mobile_bp, url_prefix="/api/mobile")
 
 app.register_blueprint(ig_bp)  # expone /webhook_instagram (GET verificación, POST eventos)
+from instagram_api_multi import ig_multi_bp
+app.register_blueprint(ig_multi_bp, url_prefix="/api/instagram_bot")
 
 
 
