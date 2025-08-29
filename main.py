@@ -834,6 +834,42 @@ def logout():
     return resp
 
 # =======================
+#  Instagram OAuth Redirect
+# =======================
+@app.route("/ig_auth_redirect", methods=["GET"])
+def ig_auth_redirect():
+    """
+    Endpoint que Meta/Facebook llamará después de un login OAuth de Instagram.
+    El parámetro 'code' llega aquí y luego lo puedes intercambiar por un access_token.
+    """
+    code = request.args.get("code")
+    error = request.args.get("error")
+
+    if error:
+        return f"❌ Error en autenticación de Instagram: {error}", 400
+    if not code:
+        return "❌ Falta parámetro 'code' en la redirección.", 400
+
+    # ⚡️ Aquí debes implementar el intercambio del 'code' por el access_token real
+    # usando el endpoint de Meta/Instagram (Graph API).
+    #
+    # Ejemplo:
+    # resp = requests.post(
+    #     "https://graph.facebook.com/v21.0/oauth/access_token",
+    #     data={
+    #         "client_id": os.getenv("IG_CLIENT_ID"),
+    #         "client_secret": os.getenv("IG_CLIENT_SECRET"),
+    #         "redirect_uri": "https://inhoustontexas.us/ig_auth_redirect",
+    #         "code": code,
+    #     },
+    #     timeout=10
+    # )
+    # token_data = resp.json()
+
+    return f"✅ Login Instagram exitoso. Code recibido: {code}"
+
+
+# =======================
 #  Guardar/Exportar
 # =======================
 @app.route("/guardar-lead", methods=["POST"])
