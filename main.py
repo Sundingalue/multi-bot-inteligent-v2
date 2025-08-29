@@ -838,10 +838,6 @@ def logout():
 # =======================
 @app.route("/ig_auth_redirect", methods=["GET"])
 def ig_auth_redirect():
-    """
-    Endpoint que Meta/Facebook llamará después de un login OAuth de Instagram.
-    El parámetro 'code' llega aquí y luego lo puedes intercambiar por un access_token.
-    """
     code = request.args.get("code")
     error = request.args.get("error")
 
@@ -850,23 +846,29 @@ def ig_auth_redirect():
     if not code:
         return "❌ Falta parámetro 'code' en la redirección.", 400
 
-    # ⚡️ Aquí debes implementar el intercambio del 'code' por el access_token real
-    # usando el endpoint de Meta/Instagram (Graph API).
-    #
-    # Ejemplo:
-    # resp = requests.post(
-    #     "https://graph.facebook.com/v21.0/oauth/access_token",
-    #     data={
-    #         "client_id": os.getenv("IG_CLIENT_ID"),
-    #         "client_secret": os.getenv("IG_CLIENT_SECRET"),
-    #         "redirect_uri": "https://inhoustontexas.us/ig_auth_redirect",
-    #         "code": code,
-    #     },
-    #     timeout=10
-    # )
-    # token_data = resp.json()
+    try:
+        resp = requests.post(
+            "https://graph.facebook.com/v21.0/oauth/access_token",
+            data={
+                "client_id": os.getenv("IG_CLIENT_ID"),
+                "client_secret": os.getenv("IG_CLIENT_SECRET"),
+                "redirect_uri": "https://inhoustontexas.us/ig_auth_redirect",
+                "code": code,
+            },
+            timeout=10,
+        )
+        token_data = resp.json()
+        # Guardamos el token para pruebas (⚠️ después moveremos a Firebase o WP)
+        print("✅ Token de Instagram:", token_data)
 
-    return f"✅ Login Instagram exitoso. Code recibido: {code}"
+        # Aquí puedes decidir: guardarlo en Firebase o mostrarlo
+        return jsonify({
+            "status": "ok",
+            "token_data": token_data
+        })
+    except Exception as e:
+        return f"❌ Error al intercambiar el code: {e}", 500
+
 
 
 # =======================
