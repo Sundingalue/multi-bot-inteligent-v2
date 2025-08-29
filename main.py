@@ -1338,44 +1338,49 @@ def push_universal():
         return jsonify({"success": False, "message": "FCM error"}), 500
     
 # =======================
-#  ✅ API Instagram Bot ON/OFF (multiusuario)
+#  ✅ API Instagram Bot (multiusuario)
 # =======================
 
-@app.route("/api/instagram_bot/status", methods=["GET", "OPTIONS"])
-def api_instagram_status():
-    if request.method == "OPTIONS":
-        return ("", 204)
+@app.route("/api/instagram_bot/status/<user_id>", methods=["GET"])
+def api_instagram_bot_status(user_id):
+    """
+    Devuelve si el bot de IG está ON/OFF para un usuario específico.
+    Lee desde Firebase en instagram_users/{user_id}/enabled.
+    """
+    try:
+        ref = db.reference(f"instagram_users/{user_id}")
+        data = ref.get() or {}
+        enabled = data.get("enabled", True)  # si no hay nada, asumimos ON
+        return jsonify({"user_id": user_id, "enabled": bool(enabled)})
+    except Exception as e:
+        print(f"❌ Error leyendo estado IG {user_id}: {e}")
+        return jsonify({"error": "Error interno"}), 500
 
-    bot = (request.args.get("bot") or "").strip()
-    if not bot:
-        return jsonify({"error": "Falta parámetro 'bot'"}), 400
 
-    bot_normalizado = _normalize_bot_name(bot) or bot
-    enabled = fb_is_bot_on(bot_normalizado)
-    return jsonify({"bot": bot_normalizado, "enabled": bool(enabled)})
+@app.route("/api/instagram_bot/toggle", methods=["POST"])
+def api_instagram_bot_toggle():
+    """
+    Cambia el estado ON/OFF para el bot de IG de un usuario específico.
+    Espera JSON: { "user_id": "...", "enabled": true/false }
+    """
+    data = request.get_json(force=True) or {}
+    user_id = (data.get("user_id") or "").strip()
+    enabled = data.get("enabled")
 
-
-@app.route("/api/instagram_bot/toggle", methods=["POST", "OPTIONS"])
-def api_instagram_toggle():
-    if request.method == "OPTIONS":
-        return ("", 204)
-
-    data = request.json or {}
-    bot = (data.get("bot") or "").strip()
-    enabled = data.get("enabled", None)
-
-    if enabled is None or not bot:
-        return jsonify({"error": "Parámetros inválidos (bot, enabled)"}), 400
-
-    bot_normalizado = _normalize_bot_name(bot) or bot
+    if not user_id or enabled is None:
+        return jsonify({"error": "Parámetros inválidos"}), 400
 
     try:
-        ref = db.reference(f"billing/status/{bot_normalizado}")
-        ref.set(bool(enabled))
-        return jsonify({"ok": True, "bot": bot_normalizado, "enabled": bool(enabled)})
+        ref = db.reference(f"instagram_users/{user_id}")
+        current = ref.get() or {}
+        current["enabled"] = bool(enabled)
+        ref.set(current)
+        print(f"[IG] Bot {user_id} -> enabled={enabled}")
+        return jsonify({"ok": True, "user_id": user_id, "enabled": bool(enabled)})
     except Exception as e:
-        print(f"❌ Error guardando estado ON/OFF para {bot_normalizado}: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
+        print(f"❌ Error guardando estado IG {user_id}: {e}")
+        return jsonify({"error": "Error interno"}), 500
+
 
 # =======================
 #  Webhook WhatsApp
