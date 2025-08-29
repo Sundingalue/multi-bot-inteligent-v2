@@ -19,6 +19,11 @@ META_VERIFY_TOKEN      = (os.getenv("META_VERIFY_TOKEN") or "").strip()
 META_PAGE_ACCESS_TOKEN = (os.getenv("META_PAGE_ACCESS_TOKEN") or "").strip()
 META_PAGE_ID           = (os.getenv("META_PAGE_ID") or "").strip()
 
+# NUEVO: credenciales para intercambio de tokens
+META_APP_ID     = (os.getenv("META_APP_ID", "279917021820450")).strip()
+META_APP_SECRET = (os.getenv("META_APP_SECRET") or "").strip()
+REDIRECT_URI    = "https://inhoustontexas.us/?ig_auth_redirect=1"
+
 # NUEVO: URL del estado ON/OFF publicada por WordPress (p.ej. https://tu-wp.com/wp-json/inh/v1/ig-bot-status?token=SECRETO)
 # TTL: segundos que guardamos en caché el estado para no golpear WP en cada mensaje.
 WP_IG_STATUS_URL = (os.getenv("WP_IG_STATUS_URL") or "").strip()
@@ -198,7 +203,6 @@ def _send_ig_text(psid: str, text: str) -> bool:
         "message": {"text": (text or "Gracias por escribirnos.")[:1000]}
     }
 
-    # 🔹 Nuevo: usamos Authorization: Bearer en vez de query param
     headers = {
         "Authorization": f"Bearer {META_PAGE_ACCESS_TOKEN}",
         "Content-Type": "application/json"
@@ -239,7 +243,6 @@ def ig_verify():
 # ===== Endpoint de debug del estado (útil para pruebas) =====
 @ig_bp.route("/ig_status", methods=["GET"])
 def ig_status():
-    # muestra el estado actual que usará el webhook
     left = max(0, IG_STATUS_TTL - (time.time() - _IG_STATUS_CACHE["ts"]))
     return jsonify({
         "enabled": _ig_is_enabled(),
@@ -251,7 +254,6 @@ def ig_status():
 # ===== Eventos =====
 @ig_bp.route("/webhook_instagram", methods=["POST"])
 def ig_events():
-    # 1) Respeta el switch del panel — si está OFF, ignoramos el mensaje
     if not _ig_is_enabled():
         logging.info("[IG] Bot OFF por panel WP — ignorando mensaje entrante.")
         return jsonify({"status":"disabled"}), 200
@@ -288,13 +290,11 @@ def ig_events():
 
         low = text.lower()
 
-        # 1) Greeting único si detecta saludo
         if (clave not in IG_GREETED) and greeting and any(k in low for k in intro_keywords):
             _send_ig_text(psid, _apply_style(bot_cfg, greeting))
             IG_GREETED.add(clave)
             _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", greeting)
 
-        # 2) Si piden link -> enviamos el booking_url del JSON (sin pasar por GPT)
         if _wants_link(text):
             url = _effective_booking_url(bot_cfg)
             if _valid_url(url):
@@ -305,23 +305,20 @@ def ig_events():
                 senders.append(psid)
                 return
 
-        # 3) Flujo normal con GPT
         IG_SESSION_HISTORY[clave].append({"role":"user","content":text})
         _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "user", text)
 
-        # Aquí podría volver a estar OFF por cambio en caliente; revalida justo antes de llamar GPT
         if not _ig_is_enabled():
             logging.info("[IG] Bot OFF tras revalidar — no se genera respuesta.")
             return
 
         respuesta = _gpt_reply(IG_SESSION_HISTORY[clave], model_name, temperature)
-        respuesta = _ensure_plain_url(respuesta)    # quita markdown para que se vea el link
+        respuesta = _ensure_plain_url(respuesta)
         respuesta = _apply_style(bot_cfg, respuesta)
 
         must_ask = bool((bot_cfg.get("style") or {}).get("always_question", False))
         respuesta = _ensure_question(bot_cfg, respuesta, force_question=must_ask)
 
-        # Evitar repetición idéntica inmediata
         if IG_SESSION_HISTORY[clave]:
             last_assistant = next((m["content"] for m in reversed(IG_SESSION_HISTORY[clave]) if m["role"]=="assistant"), "")
             if last_assistant and last_assistant.strip() == respuesta.strip():
@@ -336,7 +333,6 @@ def ig_events():
         _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", respuesta)
         senders.append(psid)
 
-    # Esquema nuevo
     for entry in (body.get("entry") or []):
         page_id = entry.get("id") or META_PAGE_ID
         for change in (entry.get("changes") or []):
@@ -348,7 +344,6 @@ def ig_events():
                 is_echo = bool(msg.get("is_echo"))
                 handle_one(page_id, psid, txt, mid, is_echo)
 
-    # Legacy
     for entry in (body.get("entry") or []):
         page_id = entry.get("id") or META_PAGE_ID
         for ev in (entry.get("messaging") or []):
@@ -361,3 +356,24 @@ def ig_events():
 
     logging.info("WEBHOOK IG SENDER_IDS: %s", senders)
     return jsonify({"status":"ok","senders":senders}), 200
+
+# ===== NUEVO: Endpoint para intercambiar "code" -> access_token =====
+@ig_bp.route("/ig_exchange_token", methods=["GET"])
+def ig_exchange_token():
+    code = request.args.get("code")
+    if not code:
+        return jsonify({"error": "Falta el parámetro 'code'"}), 400
+
+    try:
+        url = "https://graph.facebook.com/v21.0/oauth/access_token"
+        params = {
+            "client_id": META_APP_ID,
+            "client_secret": META_APP_SECRET,
+            "redirect_uri": REDIRECT_URI,
+            "code": code,
+        }
+        r = requests.get(url, params=params, timeout=20)
+        data = r.json()
+        return jsonify(data), r.status_code
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
