@@ -855,7 +855,7 @@ def ig_auth_redirect():
 # =======================
 #  ✅ API: Intercambio de código OAuth Instagram (multiusuario)
 # =======================
-@app.route("/api/instagram_bot/exchange_code", methods=["POST"])
+
 def api_instagram_exchange_code():
     """
     Recibe { "code": "...", "redirect_uri": "..." } desde Flutter.
@@ -1132,7 +1132,7 @@ def api_conversation_bot():
 # =======================
 #  ✅ API ON/OFF Instagram Bot por usuario (multiusuario)
 # =======================
-@app.route("/api/instagram_bot/toggle", methods=["POST"])
+
 def api_instagram_bot_toggle():
     """
     JSON esperado:
@@ -1162,7 +1162,7 @@ def api_instagram_bot_toggle():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-@app.route("/api/instagram_bot/status/<user_id>", methods=["GET"])
+
 def api_instagram_bot_status(user_id):
     """Devuelve ON/OFF del bot de Instagram para un usuario específico."""
     try:
@@ -1341,7 +1341,7 @@ def push_universal():
 #  ✅ API Instagram Bot (multiusuario)
 # =======================
 
-@app.route("/api/instagram_bot/status/<user_id>", methods=["GET"])
+
 def api_instagram_bot_status(user_id):
     """
     Devuelve si el bot de IG está ON/OFF para un usuario específico.
@@ -1357,7 +1357,7 @@ def api_instagram_bot_status(user_id):
         return jsonify({"error": "Error interno"}), 500
 
 
-@app.route("/api/instagram_bot/toggle", methods=["POST"])
+
 def api_instagram_bot_toggle():
     """
     Cambia el estado ON/OFF para el bot de IG de un usuario específico.
