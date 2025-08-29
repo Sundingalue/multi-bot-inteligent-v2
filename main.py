@@ -1079,6 +1079,51 @@ def api_conversation_bot():
     return jsonify({"ok": bool(ok), "enabled": bool(enabled)})
 
 # =======================
+#  ✅ API ON/OFF Instagram Bot por usuario (multiusuario)
+# =======================
+@app.route("/api/instagram_bot/toggle", methods=["POST"])
+def api_instagram_bot_toggle():
+    """
+    JSON esperado:
+    {
+      "user_id": "123456789",   # ID de la cuenta IG (viene del login OAuth)
+      "enabled": true/false
+    }
+    """
+    if not _bearer_ok(request):
+        return jsonify({"error": "No autorizado"}), 401
+
+    data = request.get_json(silent=True) or {}
+    user_id = str(data.get("user_id") or "").strip()
+    enabled = data.get("enabled", None)
+
+    if not user_id or enabled is None:
+        return jsonify({"error": "Parámetros inválidos"}), 400
+
+    try:
+        ref = db.reference(f"instagram_users/{user_id}")
+        cur = ref.get() or {}
+        cur["enabled"] = bool(enabled)
+        ref.set(cur)
+        return jsonify({"ok": True, "enabled": bool(enabled)})
+    except Exception as e:
+        print(f"❌ Error guardando estado IG bot {user_id}: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/instagram_bot/status/<user_id>", methods=["GET"])
+def api_instagram_bot_status(user_id):
+    """Devuelve ON/OFF del bot de Instagram para un usuario específico."""
+    try:
+        ref = db.reference(f"instagram_users/{user_id}")
+        data = ref.get() or {}
+        return jsonify({"enabled": bool(data.get("enabled", True))})
+    except Exception as e:
+        print(f"❌ Error leyendo estado IG bot {user_id}: {e}")
+        return jsonify({"enabled": True, "error": str(e)})
+
+
+# =======================
 #  🔔 NEW: Endpoints PUSH (evitan HTTP 404)
 # =======================
 
