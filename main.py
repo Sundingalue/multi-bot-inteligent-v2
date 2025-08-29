@@ -165,17 +165,15 @@ if not bots_config:
 # =======================
 #  💡 Registrar la API de facturación (Blueprint)
 # =======================
-from billing_api import billing_bp, record_openai_usage
-app.register_blueprint(billing_bp, url_prefix="/billing")
-
-# 💡 API móvil (JSON público para la app)
 from bots.api_mobile import mobile_bp
 from instagram_webhook import ig_bp
+from instagram_api_multi import ig_multi_bp   # 👈 Import nuevo aquí
+
 app.register_blueprint(mobile_bp, url_prefix="/api/mobile")
 
 app.register_blueprint(ig_bp)  # expone /webhook_instagram (GET verificación, POST eventos)
-from instagram_api_multi import ig_multi_bp
-app.register_blueprint(ig_multi_bp, url_prefix="/api/instagram_bot")
+app.register_blueprint(ig_multi_bp, url_prefix="/api/instagram_bot")  # 👈 Registro aquí
+
 
 
 
