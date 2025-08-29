@@ -833,11 +833,16 @@ def logout():
     resp.delete_cookie("last_username")
     return resp
 
-# =======================
-#  Instagram OAuth Redirect
-# =======================
+# ======================
+# Instagram OAuth Redirect
+# ======================
 @app.route("/ig_auth_redirect", methods=["GET"])
 def ig_auth_redirect():
+    """
+    Endpoint que Meta/Facebook llama después de un login OAuth de Instagram.
+    Aquí recibimos el parámetro 'code', lo intercambiamos por un access_token,
+    y guardamos ese token en Firebase para el usuario que hizo login.
+    """
     code = request.args.get("code")
     error = request.args.get("error")
 
@@ -847,6 +852,7 @@ def ig_auth_redirect():
         return "❌ Falta parámetro 'code' en la redirección.", 400
 
     try:
+        # 1) Intercambiar el code por el access_token en la API de Meta
         resp = requests.post(
             "https://graph.facebook.com/v21.0/oauth/access_token",
             data={
@@ -858,18 +864,26 @@ def ig_auth_redirect():
             timeout=10,
         )
         token_data = resp.json()
-        # Guardamos el token para pruebas (⚠️ después moveremos a Firebase o WP)
-        print("✅ Token de Instagram:", token_data)
+        access_token = token_data.get("access_token")
+        user_id = token_data.get("user_id")  # Meta devuelve user_id de la cuenta IG
 
-        # Aquí puedes decidir: guardarlo en Firebase o mostrarlo
-        return jsonify({
-            "status": "ok",
-            "token_data": token_data
+        if not access_token:
+            return f"❌ No se recibió access_token: {token_data}", 400
+
+        # 2) Guardar en Firebase (bajo nodo users/{user_id})
+        ref = db.reference(f"instagram_users/{user_id}")
+        ref.set({
+            "access_token": access_token,
+            "user_id": user_id,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         })
+
+        print(f"[IG] Login exitoso para user_id={user_id}")
+        return f"✅ Login Instagram exitoso. Token guardado para user {user_id}"
+
     except Exception as e:
-        return f"❌ Error al intercambiar el code: {e}", 500
-
-
+        print(f"❌ Error en intercambio de token IG: {e}")
+        return "❌ Error procesando login de Instagram", 500
 
 # =======================
 #  Guardar/Exportar
