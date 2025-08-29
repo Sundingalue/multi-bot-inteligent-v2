@@ -1240,6 +1240,46 @@ def push_universal():
     except Exception as e:
         print(f"❌ Error FCM universal: {e}")
         return jsonify({"success": False, "message": "FCM error"}), 500
+    
+# =======================
+#  ✅ API Instagram Bot ON/OFF (multiusuario)
+# =======================
+
+@app.route("/api/instagram_bot/status", methods=["GET", "OPTIONS"])
+def api_instagram_status():
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    bot = (request.args.get("bot") or "").strip()
+    if not bot:
+        return jsonify({"error": "Falta parámetro 'bot'"}), 400
+
+    bot_normalizado = _normalize_bot_name(bot) or bot
+    enabled = fb_is_bot_on(bot_normalizado)
+    return jsonify({"bot": bot_normalizado, "enabled": bool(enabled)})
+
+
+@app.route("/api/instagram_bot/toggle", methods=["POST", "OPTIONS"])
+def api_instagram_toggle():
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    data = request.json or {}
+    bot = (data.get("bot") or "").strip()
+    enabled = data.get("enabled", None)
+
+    if enabled is None or not bot:
+        return jsonify({"error": "Parámetros inválidos (bot, enabled)"}), 400
+
+    bot_normalizado = _normalize_bot_name(bot) or bot
+
+    try:
+        ref = db.reference(f"billing/status/{bot_normalizado}")
+        ref.set(bool(enabled))
+        return jsonify({"ok": True, "bot": bot_normalizado, "enabled": bool(enabled)})
+    except Exception as e:
+        print(f"❌ Error guardando estado ON/OFF para {bot_normalizado}: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 # =======================
 #  Webhook WhatsApp
