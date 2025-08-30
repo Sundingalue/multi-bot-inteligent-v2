@@ -433,21 +433,21 @@ def fb_list_leads_all():
     leads = {}
     if not isinstance(root, dict):
         return leads
-    for bot_nombre, numeros in root.items():
-        if not isinstance(numeros, dict):
-            continue
-        for numero, data in numeros.items():
-            clave = f"{bot_nombre}|{numero}"
-            leads[clave] = {
-                "bot": bot_nombre,
-                "numero": numero,
-                "first_seen": data.get("first_seen", ""),
-                "last_message": data.get("last_message", ""),
-                "last_seen": data.get("last_seen", ""),
-                "messages": int(data.get("messages", 0)),
-                "status": data.get("status", "nuevo"),
-                "notes": data.get("notes", "")
-            }
+    for numero, data in numeros.items():
+     if str(numero).startswith("ig:"):
+        continue  # 🧽 Excluir leads de Instagram
+    clave = f"{bot_nombre}|{numero}"
+    leads[clave] = {
+        "bot": bot_nombre,
+        "numero": numero,
+        "first_seen": data.get("first_seen", ""),
+        "last_message": data.get("last_message", ""),
+        "last_seen": data.get("last_seen", ""),
+        "messages": int(data.get("messages", 0)),
+        "status": data.get("status", "nuevo"),
+        "notes": data.get("notes", "")
+    }
+
     return leads
 
 def fb_list_leads_by_bot(bot_nombre):
@@ -456,18 +456,22 @@ def fb_list_leads_by_bot(bot_nombre):
     if not isinstance(numeros, dict):
         return leads
     for numero, data in numeros.items():
+        # 🧽 Excluir leads de Instagram
+        if str(numero).startswith("ig:"):
+            continue
         clave = f"{bot_nombre}|{numero}"
         leads[clave] = {
-                "bot": bot_nombre,
-                "numero": numero,
-                "first_seen": data.get("first_seen", ""),
-                "last_message": data.get("last_message", ""),
-                "last_seen": data.get("last_seen", ""),
-                "messages": int(data.get("messages", 0)),
-                "status": data.get("status", "nuevo"),
-                "notes": data.get("notes", "")
+            "bot": bot_nombre,
+            "numero": numero,
+            "first_seen": data.get("first_seen", ""),
+            "last_message": data.get("last_message", ""),
+            "last_seen": data.get("last_seen", ""),
+            "messages": int(data.get("messages", 0)),
+            "status": data.get("status", "nuevo"),
+            "notes": data.get("notes", "")
         }
     return leads
+
 
 # ✅ NUEVO: eliminar lead completo
 def fb_delete_lead(bot_nombre, numero):
