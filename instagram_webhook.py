@@ -143,7 +143,12 @@ def _append_historial(bot_nombre: str, user_id: str, tipo: str, texto: str):
         fb_append = current_app.config.get("FB_APPEND_HISTORIAL")
         if callable(fb_append):
             ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            fb_append(bot_nombre, user_id, {"tipo": tipo, "texto": texto, "hora": ahora})
+            fb_append(bot_nombre, user_id, {
+                "tipo": tipo,
+                "texto": texto,
+                "hora": ahora,
+                "canal": "instagram"  # 🔹 DIFERENCIA CLAVE
+            })
     except Exception as e:
         logging.warning("[IG] No se pudo guardar historial: %s", e)
 
