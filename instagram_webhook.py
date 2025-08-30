@@ -28,7 +28,7 @@ REDIRECT_URI    = "https://inhoustontexas.us/?ig_auth_redirect=1"
 # TTL: segundos que guardamos en caché el estado para no golpear WP en cada mensaje.
 WP_IG_STATUS_URL = (os.getenv("WP_IG_STATUS_URL") or "").strip()
 IG_STATUS_TTL    = int(os.getenv("IG_STATUS_TTL", "20"))       # 20s por defecto
-# Valor por defecto si no hay URL o falla la consulta (preferimos ON para no cortar servicio por error puntual)
+# Valor por defecto si no hay URL o falla la consulta
 IG_STATUS_DEFAULT_ON = (os.getenv("IG_STATUS_DEFAULT", "on").lower() in ("1","true","on","yes"))
 
 # ===== Anti-duplicados =====
@@ -290,7 +290,6 @@ def ig_events():
         system_prompt = (bot_cfg.get("system_prompt") or "").strip()
         model_name    = (bot_cfg.get("model") or "gpt-4o").strip()
         temperature   = float(bot_cfg.get("temperature", 0.6)) if isinstance(bot_cfg.get("temperature", None), (int,float)) else 0.6
-        greeting      = "¡Hola! ¿Qué tal tu día, cómo estás?"
         ch_ig         = (bot_cfg.get("channels") or {}).get("instagram") or {}
         intro_keywords = ch_ig.get("intro_keywords") or bot_cfg.get("intro_keywords") or ["hola","buenas","buenos dias","buenas tardes","buenas noches"]
 
@@ -300,15 +299,16 @@ def ig_events():
 
         low = text.lower()
 
-        if (clave not in IG_GREETED):
-         greeting = "¡Hola! ¿Qué tal tu día, cómo estás?"
-         _send_ig_text(psid, greeting)
-         IG_SESSION_HISTORY[clave].append({"role":"assistant","content":greeting})
-         IG_GREETED.add(clave)
-         _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", greeting)
-         return  # 👈 muy importante, evita que OpenAI mande otro saludo
+        # 👋 Saludo inicial fijo (solo 1 vez)
+        if (clave not in IG_GREETED) and any(k in low for k in intro_keywords):
+            saludo_inicial = "¡Hola! ¿Qué tal tu día, cómo estás?"
+            _send_ig_text(psid, saludo_inicial)
+            IG_SESSION_HISTORY[clave].append({"role":"assistant","content":saludo_inicial})
+            IG_GREETED.add(clave)
+            _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", saludo_inicial)
+            return  # 🚫 evita que OpenAI genere otro saludo en el primer turno
 
-
+        # Si pide link
         if _wants_link(text):
             url = _effective_booking_url(bot_cfg)
             if _valid_url(url):
@@ -376,18 +376,4 @@ def ig_events():
 def ig_exchange_token():
     code = request.args.get("code")
     if not code:
-        return jsonify({"error": "Falta el parámetro 'code'"}), 400
-
-    try:
-        url = "https://graph.facebook.com/v21.0/oauth/access_token"
-        params = {
-            "client_id": META_APP_ID,
-            "client_secret": META_APP_SECRET,
-            "redirect_uri": REDIRECT_URI,
-            "code": code,
-        }
-        r = requests.get(url, params=params, timeout=20)
-        data = r.json()
-        return jsonify(data), r.status_code
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+       
