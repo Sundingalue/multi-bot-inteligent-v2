@@ -300,10 +300,14 @@ def ig_events():
 
         low = text.lower()
 
-        if (clave not in IG_GREETED) and greeting and any(k in low for k in intro_keywords):
-            _send_ig_text(psid, _apply_style(bot_cfg, greeting))
-            IG_GREETED.add(clave)
-            _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", greeting)
+        if (clave not in IG_GREETED):
+         greeting = "¡Hola! ¿Qué tal tu día, cómo estás?"
+         _send_ig_text(psid, greeting)
+         IG_SESSION_HISTORY[clave].append({"role":"assistant","content":greeting})
+         IG_GREETED.add(clave)
+         _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", greeting)
+         return  # 👈 muy importante, evita que OpenAI mande otro saludo
+
 
         if _wants_link(text):
             url = _effective_booking_url(bot_cfg)
