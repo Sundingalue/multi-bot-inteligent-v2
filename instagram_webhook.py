@@ -167,9 +167,8 @@ def _gpt_reply(messages, model_name: str, temperature: float) -> str:
         logging.error("[IG] Error OpenAI: %s", e)
         return "Estoy teniendo un problema técnico. Intentémoslo de nuevo."
 
-# ===== Estado ON/OFF desde WordPress =====
+# ===== Estado ON/OFF =====
 _IG_STATUS_CACHE = {"ok": IG_STATUS_DEFAULT_ON, "ts": 0.0}
-
 def _ig_is_enabled() -> bool:
     now = time.time()
     if WP_IG_STATUS_URL and (now - _IG_STATUS_CACHE["ts"] < IG_STATUS_TTL):
@@ -288,13 +287,15 @@ def ig_events():
 
         low = text.lower()
 
-        # ✅ Solo saludo desde JSON
+        # ✅ Solo saludo desde JSON y NO primera respuesta de OpenAI
         if (clave not in IG_GREETED) and any(k in low for k in intro_keywords):
-            saludo_json = ch_ig.get("intro_message") or bot_cfg.get("intro_message") or ""
-            if saludo_json:
-                _send_ig_text(psid, _apply_style(bot_cfg, saludo_json))
-                IG_GREETED.add(clave)
-                _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", saludo_json)
+         saludo_json = ch_ig.get("intro_message") or bot_cfg.get("intro_message") or ""
+        if saludo_json:
+         _send_ig_text(psid, _apply_style(bot_cfg, saludo_json))
+         IG_GREETED.add(clave)
+         _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", saludo_json)
+         return  # 🚫 Evita que OpenAI responda de inmediato con un segundo saludo
+
 
         if _wants_link(text):
             url = _effective_booking_url(bot_cfg)
@@ -357,7 +358,7 @@ def ig_events():
     logging.info("WEBHOOK IG SENDER_IDS: %s", senders)
     return jsonify({"status":"ok","senders":senders}), 200
 
-# ===== Intercambio de tokens =====
+# ===== NUEVO: Endpoint para intercambiar "code" -> access_token =====
 @ig_bp.route("/ig_exchange_token", methods=["GET"])
 def ig_exchange_token():
     code = request.args.get("code")
