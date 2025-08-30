@@ -288,13 +288,15 @@ def ig_events():
         low = text.lower()
 
         # ✅ Solo saludo desde JSON y NO primera respuesta de OpenAI
+        saludo_json = ""  # inicializamos la variable
+
         if (clave not in IG_GREETED) and any(k in low for k in intro_keywords):
-         saludo_json = ch_ig.get("intro_message") or bot_cfg.get("intro_message") or ""
+          saludo_json = ch_ig.get("intro_message") or bot_cfg.get("intro_message") or ""
         if saludo_json:
          _send_ig_text(psid, _apply_style(bot_cfg, saludo_json))
          IG_GREETED.add(clave)
          _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", saludo_json)
-         return  # 🚫 cortar SOLO aquí, en el PRIMER saludo
+         return  # solo corta en el primer saludo
 
 
         if _wants_link(text):
