@@ -240,13 +240,15 @@ def ig_events():
 
         low = text.lower()
         # 👋 Saludo inicial fijo
-        if (clave not in IG_GREETED) and any(k in low for k in intro_keywords):
-            saludo = "¡Hola! ¿Qué tal tu día, cómo estás?"
-            _send_ig_text(psid, saludo)
-            IG_SESSION_HISTORY[clave].append({"role":"assistant","content":saludo})
-            IG_GREETED.add(clave)
-            _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", saludo)
-            return
+        # 👋 Saludo inicial desde el JSON del bot
+    if (clave not in IG_GREETED) and greeting and any(k in low for k in intro_keywords):
+        saludo = greeting   # viene del JSON del bot
+        _send_ig_text(psid, _apply_style(bot_cfg, saludo))
+        IG_SESSION_HISTORY[clave].append({"role": "assistant", "content": saludo})
+        IG_GREETED.add(clave)
+        _append_historial(bot_cfg.get("name", "BOT"), f"ig:{psid}", "bot", saludo)
+        return
+
 
         if _wants_link(text):
             url = _effective_booking_url(bot_cfg)
