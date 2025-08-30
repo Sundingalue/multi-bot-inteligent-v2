@@ -302,9 +302,9 @@ def ig_events():
 
         if (clave not in IG_GREETED) and greeting and any(k in low for k in intro_keywords):
          _send_ig_text(psid, _apply_style(bot_cfg, greeting))
-        IG_GREETED.add(clave)
-        _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", greeting)
-        return  # 🚫 Detener aquí para no mandar doble saludo
+         IG_GREETED.add(clave)
+         _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", greeting)
+         return  # 🚫 Evita que después OpenAI mande otro saludo
 
 
         if _wants_link(text):
