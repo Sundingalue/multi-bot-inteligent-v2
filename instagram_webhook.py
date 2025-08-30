@@ -290,7 +290,7 @@ def ig_events():
         system_prompt = (bot_cfg.get("system_prompt") or "").strip()
         model_name    = (bot_cfg.get("model") or "gpt-4o").strip()
         temperature   = float(bot_cfg.get("temperature", 0.6)) if isinstance(bot_cfg.get("temperature", None), (int,float)) else 0.6
-        greeting      = (bot_cfg.get("greeting") or "").strip()
+        greeting      = "¡Hola! ¿Qué tal tu día, cómo estás?"
         ch_ig         = (bot_cfg.get("channels") or {}).get("instagram") or {}
         intro_keywords = ch_ig.get("intro_keywords") or bot_cfg.get("intro_keywords") or ["hola","buenas","buenos dias","buenas tardes","buenas noches"]
 
