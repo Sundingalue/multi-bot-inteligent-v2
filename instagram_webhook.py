@@ -304,46 +304,83 @@ def ig_events():
          _send_ig_text(psid, _apply_style(bot_cfg, greeting))
          IG_GREETED.add(clave)
          _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", greeting)
-         return  # 🚫 Evita que después OpenAI mande otro saludo
+         return  # 🚫 Evita que después OpenAI mande otro saludodef handle_one(page_id: str, psid: str, text: str, mid: str, is_echo: bool):
+    if not psid or not text:
+        return
+    if is_echo or _seen_mid(mid):
+        return
 
+    bot_cfg = _get_bot_cfg_for_page(page_id)
+    if not bot_cfg:
+        return
 
-        if _wants_link(text):
-            url = _effective_booking_url(bot_cfg)
-            if _valid_url(url):
-                msg = ch_ig.get("link_message") or (bot_cfg.get("agenda", {}) or {}).get("link_message") or "Aquí tienes el enlace:"
-                final = f"{msg.strip()} {url}".strip()
-                _send_ig_text(psid, final)
-                _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", final)
-                senders.append(psid)
-                return
+    system_prompt = (bot_cfg.get("system_prompt") or "").strip()
+    model_name    = (bot_cfg.get("model") or "gpt-4o").strip()
+    temperature   = float(bot_cfg.get("temperature", 0.6)) if isinstance(bot_cfg.get("temperature", None), (int,float)) else 0.6
 
-        IG_SESSION_HISTORY[clave].append({"role":"user","content":text})
-        _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "user", text)
+    clave = _clave_sesion(page_id, psid)
+    if not IG_SESSION_HISTORY.get(clave):
+        IG_SESSION_HISTORY[clave] = []
+        if system_prompt:
+            IG_SESSION_HISTORY[clave].append({
+                "role": "system",
+                "content": system_prompt
+            })
 
-        if not _ig_is_enabled():
-            logging.info("[IG] Bot OFF tras revalidar — no se genera respuesta.")
+    low = text.lower()
+
+    # 👋 Saludo inicial único
+    if clave not in IG_GREETED:
+        saludo_inicial = "¡Hola! ¿Qué tal tu día, cómo estás?"
+        _send_ig_text(psid, saludo_inicial)
+        IG_SESSION_HISTORY[clave].append({
+            "role": "assistant",
+            "content": saludo_inicial
+        })
+        IG_GREETED.add(clave)
+        _append_historial(bot_cfg.get("name", "BOT"), f"ig:{psid}", "bot", saludo_inicial)
+        return  # 🚫 Evitamos que OpenAI conteste de inmediato con otro saludo
+
+    # 🔗 Si el usuario pide link
+    if _wants_link(text):
+        url = _effective_booking_url(bot_cfg)
+        if _valid_url(url):
+            msg = (bot_cfg.get("agenda", {}) or {}).get("link_message") or "Aquí tienes el enlace:"
+            final = f"{msg.strip()} {url}".strip()
+            _send_ig_text(psid, final)
+            _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", final)
             return
 
-        respuesta = _gpt_reply(IG_SESSION_HISTORY[clave], model_name, temperature)
-        respuesta = _ensure_plain_url(respuesta)
-        respuesta = _apply_style(bot_cfg, respuesta)
+    # 📥 Guardar mensaje del usuario
+    IG_SESSION_HISTORY[clave].append({"role":"user","content":text})
+    _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "user", text)
 
-        must_ask = bool((bot_cfg.get("style") or {}).get("always_question", False))
-        respuesta = _ensure_question(bot_cfg, respuesta, force_question=must_ask)
+    if not _ig_is_enabled():
+        logging.info("[IG] Bot OFF tras revalidar — no se genera respuesta.")
+        return
 
-        if IG_SESSION_HISTORY[clave]:
-            last_assistant = next((m["content"] for m in reversed(IG_SESSION_HISTORY[clave]) if m["role"]=="assistant"), "")
-            if last_assistant and last_assistant.strip() == respuesta.strip():
-                probe = _next_probe_from_bot(bot_cfg)
-                if probe and probe not in respuesta:
-                    if not respuesta.endswith((".", "!", "…", "¿", "?")):
-                        respuesta += "."
-                    respuesta = f"{respuesta} {probe}".strip()
+    # 🧠 Respuesta de OpenAI
+    respuesta = _gpt_reply(IG_SESSION_HISTORY[clave], model_name, temperature)
+    respuesta = _ensure_plain_url(respuesta)
+    respuesta = _apply_style(bot_cfg, respuesta)
 
-        _send_ig_text(psid, respuesta)
-        IG_SESSION_HISTORY[clave].append({"role":"assistant","content":respuesta})
-        _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", respuesta)
-        senders.append(psid)
+    must_ask = bool((bot_cfg.get("style") or {}).get("always_question", False))
+    respuesta = _ensure_question(bot_cfg, respuesta, force_question=must_ask)
+
+    if IG_SESSION_HISTORY[clave]:
+        last_assistant = next((m["content"] for m in reversed(IG_SESSION_HISTORY[clave]) if m["role"]=="assistant"), "")
+        if last_assistant and last_assistant.strip() == respuesta.strip():
+            probe = _next_probe_from_bot(bot_cfg)
+            if probe and probe not in respuesta:
+                if not respuesta.endswith((".", "!", "…", "¿", "?")):
+                    respuesta += "."
+                respuesta = f"{respuesta} {probe}".strip()
+
+    _send_ig_text(psid, respuesta)
+    IG_SESSION_HISTORY[clave].append({"role":"assistant","content":respuesta})
+    _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", respuesta)
+
+    senders.append(psid)
 
     for entry in (body.get("entry") or []):
         page_id = entry.get("id") or META_PAGE_ID
