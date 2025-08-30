@@ -137,20 +137,25 @@ def _get_bot_cfg_for_page(page_id: str) -> dict:
             return cfg
     return list(bots.values())[0] if bots else {}
 
-# ===== Firebase append =====
+# ===== Firebase append (filtrando IG de leads principales) =====
 def _append_historial(bot_nombre: str, user_id: str, tipo: str, texto: str):
     try:
+        # 🚫 No guardar en leads si es Instagram (empieza por "ig:")
+        if str(user_id).startswith("ig:"):
+            logging.info("[IG] Mensaje ignorado en leads (solo IG): %s", user_id)
+            return
+
         fb_append = current_app.config.get("FB_APPEND_HISTORIAL")
         if callable(fb_append):
             ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             fb_append(bot_nombre, user_id, {
                 "tipo": tipo,
                 "texto": texto,
-                "hora": ahora,
-                "canal": "instagram"  # 🔹 DIFERENCIA CLAVE
+                "hora": ahora
             })
     except Exception as e:
         logging.warning("[IG] No se pudo guardar historial: %s", e)
+
 
 # ===== OpenAI =====
 def _gpt_reply(messages, model_name: str, temperature: float) -> str:
