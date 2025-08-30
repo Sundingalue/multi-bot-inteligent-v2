@@ -294,7 +294,7 @@ def ig_events():
          _send_ig_text(psid, _apply_style(bot_cfg, saludo_json))
          IG_GREETED.add(clave)
          _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", saludo_json)
-         return  # 🚫 Evita que OpenAI responda de inmediato con un segundo saludo
+         return  # 🚫 cortar SOLO aquí, en el PRIMER saludo
 
 
         if _wants_link(text):
