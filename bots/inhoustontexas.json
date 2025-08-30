@@ -26,10 +26,11 @@
     },
 
     "channels": {
-      "instagram": {
-        "page_id": "131837286675681",
-        "ig_user_id": "17841460637585682"
-      },
+  "instagram": {
+    "page_id": "131837286675681",
+    "ig_user_id": "17841460637585682",
+    "intro_message": "¡Soy Sara, representante de ventas de In Houston Texas. ¿Con quién tengo el gusto? 😊"
+  },
       "whatsapp": {
         "number": "whatsapp:+13469882323"
       }
