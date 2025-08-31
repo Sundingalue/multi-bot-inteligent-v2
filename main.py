@@ -1,11 +1,9 @@
+# main.py — core genérico (sin conocimiento de marca en el core)
+
 # 💥💥 CORRECCIÓN FINAL 💥💥
 # Usar monkey_patch de eventlet en lugar de gevent
 import eventlet
 eventlet.monkey_patch()
-
-# 🔇 Silenciar warnings de asyncio (evita "do not call blocking functions from the mainloop")
-import logging
-logging.getLogger("asyncio").setLevel(logging.ERROR)
 
 # Resto de importaciones
 from flask import Flask, request, session, redirect, url_for, send_file, jsonify, render_template, make_response, Response
