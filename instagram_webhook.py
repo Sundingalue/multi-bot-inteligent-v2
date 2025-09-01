@@ -22,7 +22,7 @@ META_PAGE_ID           = (os.getenv("META_PAGE_ID") or "").strip()
 # NUEVO: credenciales para intercambio de tokens
 META_APP_ID     = (os.getenv("META_APP_ID", "279917021820450")).strip()
 META_APP_SECRET = (os.getenv("META_APP_SECRET") or "").strip()
-REDIRECT_URI    = "https://inhoustontexas.us/?ig_auth_redirect=1"
+REDIRECT_URI    = "https://inhoustontexas.us/ig_auth_redirect"
 
 # NUEVO: URL del estado ON/OFF publicada por WordPress
 WP_IG_STATUS_URL = (os.getenv("WP_IG_STATUS_URL") or "").strip()
@@ -288,13 +288,16 @@ def ig_events():
         low = text.lower()
 
         # ✅ Solo saludo desde JSON y NO primera respuesta de OpenAI
+        saludo_json = ""  # inicializamos la variable
+
         if (clave not in IG_GREETED) and any(k in low for k in intro_keywords):
-            saludo_json = ch_ig.get("intro_message") or bot_cfg.get("intro_message") or ""
-            if saludo_json:
-                _send_ig_text(psid, _apply_style(bot_cfg, saludo_json))
-                IG_GREETED.add(clave)
-                _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", saludo_json)
-            return  # 🚫 NO mandamos respuesta de OpenAI en el primer mensaje
+          saludo_json = ch_ig.get("intro_message") or bot_cfg.get("intro_message") or ""
+        if saludo_json:
+         _send_ig_text(psid, _apply_style(bot_cfg, saludo_json))
+         IG_GREETED.add(clave)
+         _append_historial(bot_cfg.get("name","BOT"), f"ig:{psid}", "bot", saludo_json)
+         return  # solo corta en el primer saludo
+
 
         if _wants_link(text):
             url = _effective_booking_url(bot_cfg)
