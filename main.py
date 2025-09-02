@@ -168,11 +168,12 @@ if not bots_config:
 from bots.api_mobile import mobile_bp
 from instagram_webhook import ig_bp
 from instagram_api_multi import ig_multi_bp   # 👈 Import nuevo aquí
+from billing_api import billing_bp
 
 app.register_blueprint(mobile_bp, url_prefix="/api/mobile")
-
 app.register_blueprint(ig_bp)  # expone /webhook_instagram (GET verificación, POST eventos)
 app.register_blueprint(ig_multi_bp, url_prefix="/api/instagram_bot")  # 👈 Registro aquí
+app.register_blueprint(billing_bp, url_prefix="/billing")
 
 
 
