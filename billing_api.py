@@ -803,8 +803,19 @@ def _bot_emails_for_event(payload: dict, cfg_resuelto: dict = None) -> list:
     emails = _extract_emails_from_cfg(cfg) if cfg else []
     if emails:
         return emails
+
+    # 🔁 Fallback: si no resolvió un bot, tomar correos de TODOS los bots
+    bots = load_bots_folder()
+    all_emails = []
+    for c in bots.values():
+        all_emails.extend(_extract_emails_from_cfg(c))
+    if all_emails:
+        return list(set(all_emails))  # quitar duplicados
+
+    # Último recurso: variable global EMAIL_TO
     env_to = [a.strip() for a in (os.getenv("EMAIL_TO","").split(",") if os.getenv("EMAIL_TO") else []) if a.strip()]
     return env_to
+
 
 # ====== Verificación opcional de firma HMAC de Eleven ======
 def _verify_eleven_signature(req) -> bool:
