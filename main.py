@@ -1207,11 +1207,12 @@ def push_topic():
 
     # Datos opcionales para deep-link en la app
     data = _push_common_data({
-        "link": body.get("link") or "",
-        "screen": body.get("screen") or "",
-        "empresaId": body.get("empresaId") or "",
-        "categoria": body.get("categoria") or ""
-    })
+    "url": body.get("url") or body.get("link") or "",   # 👈 añadido
+    "link": body.get("link") or "",
+    "screen": body.get("screen") or "",
+    "empresaId": body.get("empresaId") or "",
+    "categoria": body.get("categoria") or ""
+})
 
     if not title or not body_text:
         return jsonify({"success": False, "message": "title/body requeridos"}), 400
@@ -1243,11 +1244,12 @@ def push_token():
     tokens = body.get("tokens") if isinstance(body.get("tokens"), list) else None
 
     data = _push_common_data({
-        "link": body.get("link") or "",
-        "screen": body.get("screen") or "",
-        "empresaId": body.get("empresaId") or "",
-        "categoria": body.get("categoria") or ""
-    })
+    "url": body.get("url") or body.get("link") or "",   # 👈 NUEVO
+    "link": body.get("link") or "",
+    "screen": body.get("screen") or "",
+    "empresaId": body.get("empresaId") or "",
+    "categoria": body.get("categoria") or ""
+})
 
     if not title or not body_text:
         return jsonify({"success": False, "message": "title/body requeridos"}), 400
@@ -1302,11 +1304,12 @@ def push_universal():
     tokens = body.get("tokens") if isinstance(body.get("tokens"), list) else None
 
     data = _push_common_data({
-        "link": body.get("link") or "",
-        "screen": body.get("screen") or "",
-        "empresaId": body.get("empresaId") or "",
-        "categoria": body.get("categoria") or ""
-    })
+    "url": body.get("url") or body.get("link") or "",   # 👈 NUEVO
+    "link": body.get("link") or "",
+    "screen": body.get("screen") or "",
+    "empresaId": body.get("empresaId") or "",
+    "categoria": body.get("categoria") or ""
+})
 
     if not title or not body_text:
         return jsonify({"success": False, "message": "title/body requeridos"}), 400
