@@ -4,13 +4,14 @@
     "business_name": "In Houston",
     "model": "gpt-4o",
     "temperature": 0.6,
+
     "auth": {
       "username": "inhouston_admin",
       "password": "inhouston2025",
       "panel": "panel"
     },
-    
-    "phone": "+1 346-445-9960",
+
+    "phone": "+1 346-988-2323",
 
     "billing": {
       "id": "client_002",
