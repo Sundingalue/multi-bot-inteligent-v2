@@ -36,6 +36,10 @@ from firebase_admin import credentials, db
 # 🔹 NEW: FCM (para notificaciones push)
 from firebase_admin import messaging as fcm
 
+# 🔹 Avatar Realtime (sesión efímera para “Hablar ahora”)
+from avatar_realtime import bp as realtime_bp
+
+
 # Se eliminan las dependencias de WebSocket porque no funcionaban
 # import base64
 # import struct
@@ -77,6 +81,8 @@ if APP_DOWNLOAD_URL_FALLBACK and not _valid_url(APP_DOWNLOAD_URL_FALLBACK):
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 app = Flask(__name__)
+# Registro del Blueprint para Avatar Realtime
+app.register_blueprint(realtime_bp)
 # --- Exponer recursos al Blueprint de Instagram ---
 app.secret_key = "supersecreto_sundin_panel_2025"
 
