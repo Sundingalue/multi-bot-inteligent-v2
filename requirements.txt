@@ -7,6 +7,7 @@ eventlet
 gevent>=24.2.1
 gevent-websocket>=0.10.1
 flask-sock==0.7.0
+flask-cors==4.0.0
 websocket-client==1.8.0
 simple-websocket
 requests==2.32.3
