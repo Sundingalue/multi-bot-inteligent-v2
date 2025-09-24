@@ -10,7 +10,7 @@ bp = Blueprint("realtime", __name__, url_prefix="/realtime")
 
 # Opciones por defecto (puedes cambiarlas por variables de entorno si quieres)
 REALTIME_MODEL = os.getenv("REALTIME_MODEL", "gpt-4o-realtime-preview-2024-12-17")
-REALTIME_VOICE = os.getenv("REALTIME_VOICE", "verse")
+REALTIME_VOICE = os.getenv("REALTIME_VOICE", "verse")  # puedes cambiar por otra en tus env vars
 
 @bp.get("/health")
 def health():
@@ -26,19 +26,23 @@ def create_session():
     if not OPENAI_API_KEY:
         return jsonify({"ok": False, "error": "OPENAI_API_KEY no configurada"}), 500
 
+    # ⚠️ IMPORTANTE:
+    # Antes este backend forzaba "Bienvenida" y "media kit".
+    # Ahora dejamos instrucciones neutrales y estrictas para NO decir esas frases.
+    instructions = (
+        "Habla en español de México con voz masculina natural y profesional. "
+        "Tu nombre es 'Sundin Galu\u00E9' (pronuncia ga-lu-É). "
+        "La marca se llama 'Revista In Houston Texas' (es la revista, no el nombre de la persona). "
+        "NO digas 'Bienvenido', 'Bienvenida' ni 'Bienvenidos' en ningún caso salvo que el cliente lo indique textualmente. "
+        "NO menciones 'media kit' a menos que el usuario lo pida explícitamente. Si lo pide, responde que actualmente no está disponible. "
+        "No generes saludos automáticos por tu cuenta; espera las instrucciones del cliente (el front-end enviará el saludo exacto). "
+    )
+
     payload = {
         "model": REALTIME_MODEL,
         "voice": REALTIME_VOICE,
         "modalities": ["audio", "text"],
-        "instructions": (
-            "Eres el avatar oficial de Sundin Galue (Revista In Houston Texas). "
-            "Tono: profesional, cálido y directo; humor inteligente cuando suma. "
-            "Funciones: 1) Bienvenida breve. 2) Explicar revista, alcance y beneficios. "
-            "3) Orientar sobre planes y próximos pasos (WhatsApp / agendar). "
-            "4) Si no desea hablar largo, ofrecer enviar media kit al email. "
-            "5) No pidas instalar apps; mantén la interacción simple. "
-            "Si el usuario dice 'hablar después', despídete cordialmente."
-        )
+        "instructions": instructions
     }
 
     try:
