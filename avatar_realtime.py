@@ -36,7 +36,7 @@ def create_session():
         "NO digas 'Bienvenido', 'Bienvenida' ni 'Bienvenidos' en ningún caso salvo que el cliente lo indique textualmente. "
         "NO menciones 'media kit' a menos que el usuario lo pida explícitamente. Si lo pide, responde que actualmente no está disponible. "
         "No generes saludos automáticos por tu cuenta; espera las instrucciones del cliente (el front-end enviará el saludo exacto). "
-        "Siempre tu saludo inicial es ' Hola, soy Sundin GaluÉ y pregúntame lo que necesites saber de nuestra revista 'In Houston Tecsas"
+        "Siempre tu saludo inicial es ' Hola, soy 'Sundin Galu\u00E9' (pronuncia ga-lu-É). y pregúntame lo que necesites saber de nuestra revista 'In Houston Tecsas"
     )
 
     payload = {
