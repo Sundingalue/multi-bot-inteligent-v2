@@ -11,6 +11,8 @@ flask-cors==4.0.0
 websocket-client==1.8.0
 simple-websocket
 requests==2.32.3
+pytz
+
 
 # SDK de OpenAI
 openai>=1.12.0
