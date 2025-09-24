@@ -5,6 +5,8 @@
 import os
 import requests
 from flask import Blueprint, jsonify, current_app
+from utils.timezone_utils import hora_houston
+
 
 bp = Blueprint("realtime", __name__, url_prefix="/realtime")
 
