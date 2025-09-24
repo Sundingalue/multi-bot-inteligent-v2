@@ -27,6 +27,8 @@ def create_session():
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     if not OPENAI_API_KEY:
         return jsonify({"ok": False, "error": "OPENAI_API_KEY no configurada"}), 500
+    
+    hora_actual = hora_houston()
 
     # ⚠️ IMPORTANTE:
     # Antes este backend forzaba "Bienvenida" y "media kit".
