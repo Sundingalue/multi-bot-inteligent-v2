@@ -10,7 +10,7 @@ bp = Blueprint("realtime", __name__, url_prefix="/realtime")
 
 # Opciones por defecto (puedes cambiarlas por variables de entorno si quieres)
 REALTIME_MODEL = os.getenv("REALTIME_MODEL", "gpt-4o-realtime-preview-2024-12-17")
-REALTIME_VOICE = os.getenv("REALTIME_VOICE", "verse")  # puedes cambiar por otra en tus env vars
+REALTIME_VOICE = os.getenv("REALTIME_VOICE", "cedar")  # puedes cambiar por otra en tus env vars
 
 @bp.get("/health")
 def health():
@@ -36,7 +36,7 @@ def create_session():
         "NO digas 'Bienvenido', 'Bienvenida' ni 'Bienvenidos' en ningún caso salvo que el cliente lo indique textualmente. "
         "NO menciones 'media kit' a menos que el usuario lo pida explícitamente. Si lo pide, responde que actualmente no está disponible. "
         "No generes saludos automáticos por tu cuenta; espera las instrucciones del cliente (el front-end enviará el saludo exacto). "
-        "Siempre tu saludo inicial es ' Hola, soy 'Sundin Galu\u00E9' (pronuncia ga-lu-É). y pregúntame lo que necesites saber de nuestra revista 'In Houston Tecsas"
+        "Siempre tu saludo inicial es ' Hola, soy 'Sundin Galu\u00E9'. y pregúntame lo que necesites saber de nuestra revista 'In Houston Tecsas"
     )
 
     payload = {
