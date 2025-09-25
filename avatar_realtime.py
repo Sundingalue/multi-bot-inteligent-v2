@@ -45,11 +45,22 @@ def create_session():
     )
 
     payload = {
-        "model": REALTIME_MODEL,
-        "voice": REALTIME_VOICE,
-        "modalities": ["audio", "text"],
-        "instructions": instructions
+    "model": REALTIME_MODEL,
+    "voice": REALTIME_VOICE,
+    "modalities": ["audio", "text"],
+    "instructions": instructions,
+
+    # ⬇️ Menos sensibilidad al ruido (server VAD)
+    "turn_detection": {
+        "type": "server_vad",
+        # espera más silencio antes de “cambiar de turno”
+        "silence_duration_ms": 1100
+        # Nota: si tu versión soporta "threshold" o "min_voice_ms", puedes añadir:
+        # "min_voice_ms": 220,   # ignora ráfagas cortas
+        # "threshold": 0.6       # 0..1 (si el backend lo soporta)
     }
+}
+
 
     try:
         r = requests.post(
