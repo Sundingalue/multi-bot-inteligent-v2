@@ -67,8 +67,8 @@ def create_session():
             # espera más silencio antes de “cambiar de turno”
             "silence_duration_ms": 1000
             # Nota: si tu versión soporta "threshold" o "min_voice_ms", puedes añadir:
-            # "min_voice_ms": 300,   # ignora ráfagas cortas
-            # "threshold": 0.85       # 0..1 (si el backend lo soporta)
+            # "min_voice_ms": 500,   # ignora ráfagas cortas
+            # "threshold": 0.99       # 0..1 (si el backend lo soporta)
         }
     }
 
