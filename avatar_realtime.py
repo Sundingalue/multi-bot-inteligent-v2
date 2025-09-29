@@ -4,28 +4,41 @@
 
 import os
 import requests
-from flask import Blueprint, jsonify, current_app, request
+from flask import Blueprint, jsonify, current_app, request  # ← añadido request
 from utils.timezone_utils import hora_houston
 
-# Cargador de bots por JSON
+# ← NUEVO: cargador de bots por JSON
 from utils.bot_loader import load_bot
 
 bp = Blueprint("realtime", __name__, url_prefix="/realtime")
 
 # Opciones por defecto (puedes cambiarlas por variables de entorno si quieres)
 REALTIME_MODEL = os.getenv("REALTIME_MODEL", "gpt-4o-realtime-preview-2024-12-17")
-REALTIME_VOICE = os.getenv("REALTIME_VOICE", "cedar")  # cambia en tus env vars si quieres
-# VAD por defecto (ms). Más alto = menos sensible, pero no lo subas demasiado para mantener fluidez
-DEFAULT_VAD_SILENCE_MS = int(os.getenv("REALTIME_VAD_SILENCE_MS", "1300"))
+REALTIME_VOICE = os.getenv("REALTIME_VOICE", "cedar")  # puedes cambiar por otra en tus env vars
+
+# ── Defaults de VAD (sensibilidad). Solo se enviarán si están definidos/overriden.
+#    Nota: mantener 1100 como tu valor actual por compatibilidad.
+def _to_int(x):
+    try:
+        return int(x) if x is not None and str(x) != "" else None
+    except Exception:
+        return None
+
+def _to_float(x):
+    try:
+        return float(x) if x is not None and str(x) != "" else None
+    except Exception:
+        return None
+
+VAD_SILENCE_MS_DEFAULT = _to_int(os.getenv("REALTIME_VAD_SILENCE_MS")) or 1100
+VAD_MIN_MS_DEFAULT = _to_int(os.getenv("REALTIME_VAD_MIN_MS"))          # puede ser None
+VAD_THRESHOLD_DEFAULT = _to_float(os.getenv("REALTIME_VAD_THRESHOLD"))  # puede ser None
+
 
 @bp.get("/health")
 def health():
-    return jsonify({
-        "ok": True,
-        "service": "realtime",
-        "model": REALTIME_MODEL,
-        "vad_silence_ms_default": DEFAULT_VAD_SILENCE_MS
-    })
+    return jsonify({"ok": True, "service": "realtime", "model": REALTIME_MODEL})
+
 
 @bp.post("/session")
 def create_session():
@@ -36,11 +49,11 @@ def create_session():
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     if not OPENAI_API_KEY:
         return jsonify({"ok": False, "error": "OPENAI_API_KEY no configurada"}), 500
-
+    
     hora_actual = hora_houston()
 
     # ─────────────────────────────────────────────────────────────
-    # Cargar configuración del bot desde JSON (escalable)
+    # NUEVO: Cargar configuración del bot desde JSON (escalable)
     # Prioridad: query ?bot=ID  -> header X-Bot-Id -> 'sundin'
     bot_id = request.args.get("bot") or request.headers.get("X-Bot-Id") or "sundin"
     try:
@@ -60,14 +73,30 @@ def create_session():
     model_to_use = model_from_json or REALTIME_MODEL
     voice_to_use = voice_from_json or REALTIME_VOICE
     modalities_to_use = modalities_from_json or ["audio", "text"]
+    # ─────────────────────────────────────────────────────────────
 
-    # ── Sensibilidad del VAD: permitimos override por query ?vad_ms=1200 (rango seguro 800-1800)
+    # ── Sensibilidad VAD: permite ajustar sin tocar código (env o query)
     vad_ms = request.args.get("vad_ms", type=int)
     if vad_ms is None:
-        vad_ms = DEFAULT_VAD_SILENCE_MS
-    # clamp a rango razonable para no romper fluidez ni hacerlo sordo
-    vad_ms = max(800, min(1800, vad_ms))
-    # ─────────────────────────────────────────────────────────────
+        vad_ms = VAD_SILENCE_MS_DEFAULT
+
+    vad_min_ms = request.args.get("vad_min_voice_ms", type=int)
+    if vad_min_ms is None:
+        vad_min_ms = VAD_MIN_MS_DEFAULT  # puede seguir siendo None
+
+    vad_threshold = request.args.get("vad_threshold", type=float)
+    if vad_threshold is None:
+        vad_threshold = VAD_THRESHOLD_DEFAULT  # puede seguir siendo None
+
+    # Construye el bloque turn_detection solo con claves definidas
+    turn_detection = {
+        "type": "server_vad",
+        "silence_duration_ms": vad_ms
+    }
+    if vad_min_ms is not None:
+        turn_detection["min_voice_ms"] = vad_min_ms
+    if vad_threshold is not None:
+        turn_detection["threshold"] = vad_threshold
 
     payload = {
         "model": model_to_use,
@@ -75,13 +104,8 @@ def create_session():
         "modalities": modalities_to_use,
         "instructions": instructions,
 
-        # ⬇️ Menos sensibilidad al ruido (server VAD)
-        # Solo usamos el campo oficialmente soportado: silence_duration_ms
-        # (No enviamos min_voice_ms/threshold para evitar incompatibilidades)
-        "turn_detection": {
-            "type": "server_vad",
-            "silence_duration_ms": vad_ms
-        }
+        # ⬇️ Sensibilidad al ruido (server VAD) — ahora configurable
+        "turn_detection": turn_detection
     }
 
     try:
@@ -97,6 +121,6 @@ def create_session():
         if r.status_code >= 400:
             return jsonify({"ok": False, "error": "OpenAI Realtime error", "detail": r.text}), 502
 
-        return jsonify({"ok": True, "session": r.json(), "applied_vad_ms": vad_ms})
+        return jsonify({"ok": True, "session": r.json()})
     except Exception as e:
         return jsonify({"ok": False, "error": "Excepción creando sesión", "detail": str(e)}), 500
