@@ -66,7 +66,7 @@ def create_session():
     "type": "server_vad",
     "silence_duration_ms": 1200,  # mantiene fluidez
     "min_voice_ms": 220,          # filtra ráfagas cortas (teclado/clics)
-    "threshold": 0.7             # 0.0–1.0; más alto = menos sensible
+    "threshold": 0.6             # 0.0–1.0; más alto = menos sensible
 }
 
     }
