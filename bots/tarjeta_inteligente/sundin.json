@@ -3,7 +3,7 @@
   "display_name": "Sundin Galué",
   "brand": {
     "company": "Revista In Houston Texas",
-    "accent": "es-MX",
+    "accent": ["es-MX", "en-US"],
     "palette": {
       "primary": "#000000",
       "secondary": "#f7bd02"
@@ -13,7 +13,7 @@
     "phone_e164": "+17862237089",
     "whatsapp_link": "https://wa.me/17862237089",
     "email": "info@inhoustontexas.us",
-    "website": "https://inhoustontexas.us/sundin",
+    "website": "https://inhoustontexas.us/s044172",
     "vcard_url": "https://inhoustontexas.us/avatar/contact/sundin.vcf"
   },
   "assets": {
