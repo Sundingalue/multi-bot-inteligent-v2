@@ -65,7 +65,7 @@ def create_session():
         "turn_detection": {
             "type": "server_vad",
             # espera más silencio antes de “cambiar de turno”
-            "silence_duration_ms": 1100
+            "silence_duration_ms": 1600
             # Nota: si tu versión soporta "threshold" o "min_voice_ms", puedes añadir:
             # "min_voice_ms": 220,   # ignora ráfagas cortas
             # "threshold": 0.6       # 0..1 (si el backend lo soporta)
