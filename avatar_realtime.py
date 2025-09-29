@@ -4,7 +4,7 @@
 
 import os
 import requests
-from flask import Blueprint, jsonify, current_app, request  # ← request ya estaba
+from flask import Blueprint, jsonify, current_app, request
 from utils.timezone_utils import hora_houston
 
 # Cargador de bots por JSON (tarjeta inteligente)
@@ -13,32 +13,36 @@ from utils.bot_loader import load_bot
 bp = Blueprint("realtime", __name__, url_prefix="/realtime")
 
 # ─────────────────────────────────────────────────────────────
-# CONFIGURACIÓN CENTRAL DEL AVATAR (AQUÍ AJUSTAS TODO)
+# CONFIGURACIÓN CENTRAL DEL AVATAR (AJUSTA SOLO AQUÍ)
+
 # Modelo y voz por defecto (si el JSON del cliente no especifica)
 REALTIME_MODEL = os.getenv("REALTIME_MODEL", "gpt-4o-realtime-preview-2024-12-17")
 REALTIME_VOICE = os.getenv("REALTIME_VOICE", "cedar")
 
-# 🎙️ VAD (sensibilidad del micrófono) — AJUSTA SOLO ESTOS 3 VALORES:
-# - VAD_SILENCE_MS : tiempo de silencio para ceder turno (más alto = menos cortes, pero no lo subas demasiado para no volverlo lento)
-# - VAD_MIN_VOICE_MS: ignora ruidos muy cortos (teclas/clicks). Si tu backend no lo soporta, pon None.
-# - VAD_THRESHOLD  : 0..1; más alto = menos sensible al ruido. Si no lo soporta, pon None.
-VAD_SILENCE_MS   = 1300     # 1200–1400 recomendado para fluidez y menos cortes
-VAD_MIN_VOICE_MS = 450      # 400–500 recomendado (o None si no soporta)
-VAD_THRESHOLD    = 0.92     # 0.90–0.96 recomendado (o None si no soporta)
+# 🎙️ VAD (sensibilidad del micrófono)
+# Recomendado para fluidez y menos cortes:
+VAD_SILENCE_MS   = 1300     # 1200–1400; más alto = espera más silencio para ceder turno
+# Campos avanzados: algunas versiones del backend NO los aceptan.
+# Por eso los dejamos desactivados por defecto para que nada se rompa.
+ADVANCED_VAD_ENABLED = False  # ← Cambia a True solo si tu versión lo soporta
+
+VAD_MIN_VOICE_MS = 450       # 400–500; ignora ráfagas cortas (solo si ADVANCED_VAD_ENABLED=True)
+VAD_THRESHOLD    = 0.92      # 0.90–0.96; más alto = menos sensible (solo si ADVANCED_VAD_ENABLED=True)
 # ─────────────────────────────────────────────────────────────
 
 
 @bp.get("/health")
 def health():
+    # Exponemos los valores vigentes para diagnóstico rápido
     return jsonify({
         "ok": True,
         "service": "realtime",
         "model": REALTIME_MODEL,
-        # Exponemos los valores vigentes para que puedas verificarlos rápido
         "vad": {
             "silence_ms": VAD_SILENCE_MS,
-            "min_voice_ms": VAD_MIN_VOICE_MS,
-            "threshold": VAD_THRESHOLD
+            "advanced_enabled": ADVANCED_VAD_ENABLED,
+            "min_voice_ms": VAD_MIN_VOICE_MS if ADVANCED_VAD_ENABLED else None,
+            "threshold": VAD_THRESHOLD if ADVANCED_VAD_ENABLED else None,
         }
     })
 
@@ -78,23 +82,24 @@ def create_session():
     modalities_to_use = modalities_from_json or ["audio", "text"]
     # ─────────────────────────────────────────────────────────────
 
-    # Construimos el bloque VAD solo con claves soportadas (no mandamos None)
+    # Construimos el bloque VAD de forma segura (solo enviamos lo soportado)
     turn_detection = {
         "type": "server_vad",
         "silence_duration_ms": int(VAD_SILENCE_MS)
     }
-    if VAD_MIN_VOICE_MS is not None:
-        turn_detection["min_voice_ms"] = int(VAD_MIN_VOICE_MS)
-    if VAD_THRESHOLD is not None:
-        turn_detection["threshold"] = float(VAD_THRESHOLD)
+    if ADVANCED_VAD_ENABLED:
+        # Estos dos campos SOLO se incluyen si activas el flag.
+        # Si tu backend no los acepta, déjalos desactivados para evitar 4xx.
+        if VAD_MIN_VOICE_MS is not None:
+            turn_detection["min_voice_ms"] = int(VAD_MIN_VOICE_MS)
+        if VAD_THRESHOLD is not None:
+            turn_detection["threshold"] = float(VAD_THRESHOLD)
 
     payload = {
         "model": model_to_use,
         "voice": voice_to_use,
         "modalities": modalities_to_use,
         "instructions": instructions,
-
-        # ⬇️ Sensibilidad al ruido (server VAD) — CENTRALIZADO AQUÍ
         "turn_detection": turn_detection
     }
 
