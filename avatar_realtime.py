@@ -65,8 +65,8 @@ def create_session():
         "turn_detection": {
     "type": "server_vad",
     "silence_duration_ms": 1200,  # mantiene fluidez
-    "min_voice_ms": 500,          # filtra ráfagas cortas (teclado/clics)
-    "threshold": 0.94             # 0.0–1.0; más alto = menos sensible
+    "min_voice_ms": 300,          # filtra ráfagas cortas (teclado/clics)
+    "threshold": 0.85             # 0.0–1.0; más alto = menos sensible
         }
     }
 
