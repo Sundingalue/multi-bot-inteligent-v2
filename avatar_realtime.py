@@ -63,12 +63,10 @@ def create_session():
 
         # ⬇️ Menos sensibilidad al ruido (server VAD)
         "turn_detection": {
-            "type": "server_vad",
-            # espera más silencio antes de “cambiar de turno”
-            "silence_duration_ms": 1000
-            # Nota: si tu versión soporta "threshold" o "min_voice_ms", puedes añadir:
-            # "min_voice_ms": 500,   # ignora ráfagas cortas
-            # "threshold": 0.99       # 0..1 (si el backend lo soporta)
+    "type": "server_vad",
+    "silence_duration_ms": 1200,  # mantiene fluidez
+    "min_voice_ms": 500,          # filtra ráfagas cortas (teclado/clics)
+    "threshold": 0.94             # 0.0–1.0; más alto = menos sensible
         }
     }
 
