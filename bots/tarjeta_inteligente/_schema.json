@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tarjeta Inteligente - Bot Config",
+  "type": "object",
+  "required": ["id", "display_name", "brand", "instructions", "realtime"],
+  "properties": {
+    "id": { "type": "string", "description": "slug único del cliente, ej. 'sundin'" },
+    "display_name": { "type": "string", "description": "Nombre mostrado por el agente" },
+    "brand": {
+      "type": "object",
+      "required": ["company", "accent", "palette"],
+      "properties": {
+        "company": { "type": "string" },
+        "accent": { "type": "string", "description": "ej. 'mx-es' o regional" },
+        "palette": {
+          "type": "object",
+          "properties": {
+            "primary": { "type": "string" },
+            "secondary": { "type": "string" }
+          }
+        }
+      }
+    },
+    "contact": {
+      "type": "object",
+      "properties": {
+        "phone_e164": { "type": "string" },
+        "whatsapp_link": { "type": "string" },
+        "email": { "type": "string" },
+        "website": { "type": "string" },
+        "vcard_url": { "type": "string" }
+      }
+    },
+    "assets": {
+      "type": "object",
+      "properties": {
+        "avatar_image": { "type": "string" },
+        "logo": { "type": "string" }
+      }
+    },
+    "instructions": {
+      "type": "object",
+      "required": ["system_prompt"],
+      "properties": {
+        "system_prompt": { "type": "string" },
+        "greeting_template": { "type": "string" },
+        "disallowed_phrases": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "realtime": {
+      "type": "object",
+      "required": ["model", "voice", "modalities"],
+      "properties": {
+        "model": { "type": "string" },
+        "voice": { "type": "string" },
+        "modalities": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "meta": {
+      "type": "object",
+      "properties": {
+        "created_by": { "type": "string" },
+        "notes": { "type": "string" }
+      }
+    }
+  }
+}
