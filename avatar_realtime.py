@@ -21,12 +21,12 @@ REALTIME_VOICE = os.getenv("REALTIME_VOICE", "cedar")
 
 # 🎙️ VAD (sensibilidad del micrófono)
 # Recomendado para fluidez y menos cortes:
-VAD_SILENCE_MS   = 9000     # 1200–1400; más alto = espera más silencio para ceder turno
+VAD_SILENCE_MS   = 1200     # 1200–1400; más alto = espera más silencio para ceder turno
 # Campos avanzados: algunas versiones del backend NO los aceptan.
 # Por eso los dejamos desactivados por defecto para que nada se rompa.
 ADVANCED_VAD_ENABLED = False  # ← Cambia a True solo si tu versión lo soporta
 
-VAD_MIN_VOICE_MS = 2.0       # 400–500; ignora ráfagas cortas (solo si ADVANCED_VAD_ENABLED=True)
+VAD_MIN_VOICE_MS = 800       # 400–500; ignora ráfagas cortas (solo si ADVANCED_VAD_ENABLED=True)
 VAD_THRESHOLD    = 2.0      # 0.90–0.96; más alto = menos sensible (solo si ADVANCED_VAD_ENABLED=True)
 # ─────────────────────────────────────────────────────────────
 
