@@ -38,7 +38,7 @@ from firebase_admin import messaging as fcm
 
 # 🔹 Avatar Realtime (sesión efímera para “Hablar ahora”)
 from avatar_realtime import bp as realtime_bp
-
+from avatar_profiles import bp as profiles_bp
 
 # Se eliminan las dependencias de WebSocket porque no funcionaban
 # import base64
@@ -83,6 +83,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 app = Flask(__name__)
 # Registro del Blueprint para Avatar Realtime
 app.register_blueprint(realtime_bp)
+app.register_blueprint(profiles_bp)
 # --- Exponer recursos al Blueprint de Instagram ---
 app.secret_key = "supersecreto_sundin_panel_2025"
 
