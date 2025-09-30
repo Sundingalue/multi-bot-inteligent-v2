@@ -37,7 +37,7 @@ from firebase_admin import credentials, db
 from firebase_admin import messaging as fcm
 
 # 🔹 Avatar Realtime (sesión efímera para “Hablar ahora”)
-from routes.realtime_session import bp as realtime_bp
+from avatar_realtime import bp as realtime_bp
 
 
 # Se eliminan las dependencias de WebSocket porque no funcionaban
