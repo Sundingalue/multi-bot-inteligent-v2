@@ -94,12 +94,24 @@ app.config.update({
 })
 
 # 🌐 NEW: CORS básico para llamadas desde WordPress / app
+# Dominios permitidos para front
+ALLOWED_ORIGINS = {
+    "https://inhoustontexas.us",
+    "https://www.inhoustontexas.us"
+}
+
 @app.after_request
 def add_cors_headers(resp):
-    resp.headers["Access-Control-Allow-Origin"] = "*"
+    origin = request.headers.get("Origin", "")
+    if origin in ALLOWED_ORIGINS:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Vary"] = "Origin"
+    # Encabezados y métodos que vamos a permitir
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    resp.headers["Access-Control-Max-Age"] = "86400"
     return resp
+
 
 def _bearer_ok(req) -> bool:
     """Devuelve True si no hay token configurado o si el header Authorization coincide."""
