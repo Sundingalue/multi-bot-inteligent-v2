@@ -34,7 +34,7 @@ ADVANCED_VAD_ENABLED_DEF  = os.getenv("ADVANCED_VAD_ENABLED", "0") in ("1", "tru
 
 # Cuando el backend lo soporta:
 # threshold típico en escala 0.0–1.0 (más alto = menos sensible)
-VAD_THRESHOLD_DEFAULT     = float(os.getenv("VAD_THRESHOLD", "0.12"))
+VAD_THRESHOLD_DEFAULT     = float(os.getenv("VAD_THRESHOLD", "1"))
 # ignora ráfagas cortas (en ms)
 VAD_MIN_VOICE_MS_DEFAULT  = int(os.getenv("VAD_MIN_VOICE_MS", "500"))
 
