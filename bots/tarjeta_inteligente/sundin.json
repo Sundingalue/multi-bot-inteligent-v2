@@ -33,5 +33,29 @@
   "meta": {
     "created_by": "info@inhoustontexas.us",
     "notes": "Cliente base; usar como plantilla."
+  },
+
+
+  "slug": "sundin",
+  "ui": {
+    "brand_label": "IN Houston Texas",
+    "button_color": "#f7bd02",
+    "profile_focus_x": "50%",
+    "profile_focus_y": "20%"
+  },
+  "vcard": {
+    "org": "Revista In Houston Texas",
+    "title": "CEO",
+    "adr": ";;1325 Main St Suite 203;Katy;TX;77494;USA",
+    "note": "Contacto oficial. Revista In Houston Texas",
+    "photo_url": "https://inhoustontexas.us/wp-content/uploads/2025/09/FOTO-SUNDIN-PERFIL-copia-scaled.jpg"
+  },
+  "links": {
+    "calendar": "https://calendar.app.google/2PAh6A4Lkxw3qxLC9",
+    "maps_office": "https://maps.app.goo.gl/EnhXKUehoqe1RzF37",
+    "app_download": "https://inhoustontexas.us/descargar-app/"
+  },
+  "endpoints": {
+    "realtime_session": "https://multi-bot-inteligente-v1.onrender.com/realtime/session"
   }
 }
