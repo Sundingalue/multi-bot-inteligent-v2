@@ -1,4 +1,4 @@
-# routes/realtime_session.py
+# routes/avatar_realtime.py
 # Endpoint para crear una sesión efímera de voz en tiempo real (OpenAI Realtime)
 # Se registra como Blueprint en main.py. No cambia tu Start Command.
 
@@ -152,12 +152,16 @@ def health():
     })
 
 
-@bp.post("/session")
+@bp.route("/session", methods=["POST", "OPTIONS"])
 def create_session():
     """
     Crea una sesión efímera con OpenAI Realtime usando los diales VAD server-side.
     Prioridad de configuración: ENV < query params < JSON body.
     """
+    if request.method == "OPTIONS":
+        # Responde rápido al preflight CORS
+        return ("", 204)
+
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     if not OPENAI_API_KEY:
         return jsonify({"ok": False, "error": "OPENAI_API_KEY no configurada"}), 500
