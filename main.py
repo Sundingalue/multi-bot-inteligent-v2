@@ -6,7 +6,8 @@ import eventlet
 eventlet.monkey_patch()
 
 # Resto de importaciones
-from flask import Flask, request, session, redirect, url_for, send_file, jsonify, render_template, make_response, Response
+from flask import Flask, request, session, redirect, url_for, send_file, send_from_directory, jsonify, render_template, make_response, Response
+import pathlib
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import VoiceResponse, Gather, Connect
 from openai import OpenAI
@@ -86,6 +87,31 @@ app.register_blueprint(realtime_bp)
 app.register_blueprint(profiles_bp)
 # --- Exponer recursos al Blueprint de Instagram ---
 app.secret_key = "supersecreto_sundin_panel_2025"
+
+# === JSON de Tarjeta Inteligente (sirve archivos desde bots/tarjeta_inteligente) ===
+JSON_DIR = os.path.join(os.path.dirname(__file__), "bots", "tarjeta_inteligente")
+
+# 1) Sirve los JSON crudos (ej: /clients/sundin.json)
+@app.route("/clients/<path:filename>", methods=["GET"])
+def clients_static(filename):
+    return send_from_directory(JSON_DIR, filename, mimetype="application/json")
+
+# 2) API normalizada por slug (ej: /api/avatar/sundin.json)
+@app.route("/api/avatar/<slug>.json", methods=["GET"])
+def api_avatar(slug):
+    fp = os.path.join(JSON_DIR, f"{slug}.json")
+    if not os.path.isfile(fp):
+        return jsonify({"error": "Perfil no encontrado"}), 404
+    with open(fp, "r", encoding="utf-8") as f:
+        data = json.load(f) or {}
+    # Asegura campos mínimos
+    data.setdefault("slug", slug)
+    data.setdefault("endpoints", {}).setdefault(
+        "realtime_session",
+        "https://multi-bot-inteligente-v1.onrender.com/realtime/session"
+    )
+    return jsonify(data)
+
 
 # ✅ Sesión persistente (remember me)
 app.permanent_session_lifetime = timedelta(days=60)
