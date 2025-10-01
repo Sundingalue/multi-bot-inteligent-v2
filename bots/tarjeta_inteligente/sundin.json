@@ -1,6 +1,6 @@
 {
   "id": "sundin",
-  "display_name": "Sundin Galué",
+  "display_name": "Sun Galué",
   "brand": {
     "company": "Revista In Houston Texas",
     "accent": ["es-MX", "en-US"],
@@ -44,7 +44,7 @@
     "profile_focus_y": "20%"
   },
   "vcard": {
-    "org": "Revista In Houston Texas",
+    "org": "In Houston Texas",
     "title": "CEO",
     "adr": ";;1325 Main St Suite 203;Katy;TX;77494;USA",
     "note": "Contacto oficial. Revista In Houston Texas",
