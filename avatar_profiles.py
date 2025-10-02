@@ -8,8 +8,8 @@ from flask import Blueprint, jsonify
 bp = Blueprint("avatars", __name__, url_prefix="/avatars")
 
 # 📌 Carpeta donde tienes tus JSON (bots/tarjeta_inteligente)
-# Antes: buscaba mal dentro de /routes/bots
-PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))  # sube de /routes a la raíz
+# ✅ Ahora correcto: parte desde la raíz del proyecto
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))  # raíz del proyecto
 BASE_DIR = os.path.join(PROJECT_ROOT, "bots", "tarjeta_inteligente")
 
 @bp.route("/<slug>.json", methods=["GET"])
