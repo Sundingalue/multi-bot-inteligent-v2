@@ -1,6 +1,6 @@
 {
   "id": "nina",
-  "display_name": "Nina",
+  "display_name": "Nina Alarcon",
   "brand": {
     "company": "Fit and Healthy",
     "accent": ["es-MX", "en-US"],
@@ -17,7 +17,7 @@
     "vcard_url": "https://inhoustontexas.us/avatar/contact/nina.vcf"
   },
   "assets": {
-    "avatar_image": "https://inhoustontexas.us/wp-content/uploads/2025/10/Captura-de-pantalla-2025-10-02-a-las-2.54.11-p.m.png",
+    "avatar_image": "https://inhoustontexas.us/wp-content/uploads/2025/10/Nina.webp",
     "logo": "https://inhoustontexas.us/wp-content/uploads/2022/10/logo-2-de-inhouston.png"
   },
   "instructions": {
@@ -32,7 +32,7 @@
   },
   "meta": {
     "created_by": "info@inhoustontexas.us",
-    "notes": "Cliente isabel Molero; copia de plantilla base."
+    "notes": "Fit And Healthy, El sitio de la tranquilidad."
   },
   "slug": "nina",
   "ui": {
@@ -47,7 +47,7 @@
     "title": "CEO",
     "adr": ";;1325 Main St Suite 203;Katy;TX;77494;USA",
     "note": "Contacto oficial. Revista In Houston Texas",
-    "photo_url": "https://inhoustontexas.us/wp-content/uploads/2025/10/Captura-de-pantalla-2025-10-02-a-las-2.54.11-p.m.png"
+    "photo_url": "https://inhoustontexas.us/wp-content/uploads/2025/10/Nina.webp"
   },
   "links": {
     "calendar": "https://calendar.app.google/2PAh6A4Lkxw3qxLC9",
