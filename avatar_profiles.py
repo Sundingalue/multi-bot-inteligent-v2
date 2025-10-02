@@ -8,9 +8,9 @@ from flask import Blueprint, jsonify
 bp = Blueprint("avatars", __name__, url_prefix="/avatars")
 
 # 📌 Carpeta donde tienes tus JSON (bots/tarjeta_inteligente)
-# Antes: os.path.join(os.path.dirname(__file__), "bots", "tarjeta_inteligente")
-# Ahora corregido para subir un nivel
-BASE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "bots", "tarjeta_inteligente")
+# Antes: buscaba mal dentro de /routes/bots
+PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))  # sube de /routes a la raíz
+BASE_DIR = os.path.join(PROJECT_ROOT, "bots", "tarjeta_inteligente")
 
 @bp.route("/<slug>.json", methods=["GET"])
 def get_avatar(slug):
