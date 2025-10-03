@@ -1,9 +1,9 @@
 # main.py — core genérico (sin conocimiento de marca en el core)
 
 # 💥💥 CORRECCIÓN FINAL 💥💥
-# Usar monkey_patch de eventlet en lugar de gevent
-import eventlet
-eventlet.monkey_patch()
+# ❌ Se elimina eventlet.monkey_patch() porque no usamos eventlet
+# import eventlet
+# eventlet.monkey_patch()
 
 # Resto de importaciones
 from flask import Flask, request, session, redirect, url_for, send_file, send_from_directory, jsonify, render_template, make_response, Response
