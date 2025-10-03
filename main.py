@@ -339,7 +339,7 @@ def _ensure_question(bot_cfg: dict, text: str, force_question: bool) -> str:
     return f"{txt} {probe}".strip() if probe else txt
 
 def _make_system_message(bot_cfg: dict) -> str:
-    return (bot_cfg or {}).get("system_prompt", "") or ""
+    return (bot_cfg or {}).get("system_prompt") or (bot_cfg or {}).get("prompt") or ""
 
 # =======================
 #  Helpers de links por BOT
@@ -1670,7 +1670,7 @@ def _voice_get_bot_config(to_number: str) -> dict:
     config = {
         "bot_name": bot_cfg.get("name", "Unknown"),
         "model": bot_cfg.get("model", "gpt-4o"),
-        "system_prompt": bot_cfg.get("system_prompt", "Eres un asistente de voz amable y natural. Habla con una voz humana."),
+        "system_prompt": (bot_cfg.get("system_prompt") or bot_cfg.get("prompt") or ""),
         "voice_greeting": bot_cfg.get("voice_greeting", f"Hola, soy el asistente de {bot_cfg.get('business_name', bot_cfg.get('name', 'el bot'))}. ¿Cómo puedo ayudarte?"),
         "openai_voice": bot_cfg.get("realtime", {}).get("voice", "nova"),
     }
