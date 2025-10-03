@@ -6,7 +6,8 @@ import eventlet
 eventlet.monkey_patch()
 
 # Resto de importaciones
-from flask import Flask, request, session, redirect, url_for, send_file, jsonify, render_template, make_response, Response
+from flask import Flask, request, session, redirect, url_for, send_file, send_from_directory, jsonify, render_template, make_response, Response
+import pathlib
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import VoiceResponse, Gather, Connect
 from openai import OpenAI
@@ -26,7 +27,6 @@ import html
 import uuid
 import requests
 
-
 # 🔹 Twilio REST (para enviar mensajes manuales desde el panel)
 from twilio.rest import Client as TwilioClient
 
@@ -36,8 +36,19 @@ from firebase_admin import credentials, db
 # 🔹 NEW: FCM (para notificaciones push)
 from firebase_admin import messaging as fcm
 
+# ✅ Crear la app ANTES de registrar los blueprints
+app = Flask(__name__)
+
 # 🔹 Avatar Realtime (sesión efímera para “Hablar ahora”)
 from avatar_realtime import bp as realtime_bp
+from avatar_profiles import bp as profiles_bp
+from voice_realtime import bp as voice_rt_bp
+
+# ✅ Registrar los blueprints
+app.register_blueprint(realtime_bp)
+app.register_blueprint(profiles_bp)
+app.register_blueprint(voice_rt_bp)
+
 
 
 # Se eliminan las dependencias de WebSocket porque no funcionaban
@@ -83,8 +94,34 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 app = Flask(__name__)
 # Registro del Blueprint para Avatar Realtime
 app.register_blueprint(realtime_bp)
+app.register_blueprint(profiles_bp)
 # --- Exponer recursos al Blueprint de Instagram ---
 app.secret_key = "supersecreto_sundin_panel_2025"
+
+# === JSON de Tarjeta Inteligente (sirve archivos desde bots/tarjeta_inteligente) ===
+JSON_DIR = os.path.join(os.path.dirname(__file__), "bots", "tarjeta_inteligente")
+
+# 1) Sirve los JSON crudos (ej: /clients/sundin.json)
+@app.route("/clients/<path:filename>", methods=["GET"])
+def clients_static(filename):
+    return send_from_directory(JSON_DIR, filename, mimetype="application/json")
+
+# 2) API normalizada por slug (ej: /api/avatar/sundin.json)
+@app.route("/api/avatar/<slug>.json", methods=["GET"])
+def api_avatar(slug):
+    fp = os.path.join(JSON_DIR, f"{slug}.json")
+    if not os.path.isfile(fp):
+        return jsonify({"error": "Perfil no encontrado"}), 404
+    with open(fp, "r", encoding="utf-8") as f:
+        data = json.load(f) or {}
+    # Asegura campos mínimos
+    data.setdefault("slug", slug)
+    data.setdefault("endpoints", {}).setdefault(
+        "realtime_session",
+        "https://multi-bot-inteligente-v1.onrender.com/realtime/session"
+    )
+    return jsonify(data)
+
 
 # ✅ Sesión persistente (remember me)
 app.permanent_session_lifetime = timedelta(days=60)
@@ -94,12 +131,24 @@ app.config.update({
 })
 
 # 🌐 NEW: CORS básico para llamadas desde WordPress / app
+# Dominios permitidos para front
+ALLOWED_ORIGINS = {
+    "https://inhoustontexas.us",
+    "https://www.inhoustontexas.us"
+}
+
 @app.after_request
 def add_cors_headers(resp):
-    resp.headers["Access-Control-Allow-Origin"] = "*"
+    origin = request.headers.get("Origin", "")
+    if origin in ALLOWED_ORIGINS:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Vary"] = "Origin"
+    # Encabezados y métodos que vamos a permitir
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    resp.headers["Access-Control-Max-Age"] = "86400"
     return resp
+
 
 def _bearer_ok(req) -> bool:
     """Devuelve True si no hay token configurado o si el header Authorization coincide."""
@@ -300,7 +349,7 @@ def _ensure_question(bot_cfg: dict, text: str, force_question: bool) -> str:
     return f"{txt} {probe}".strip() if probe else txt
 
 def _make_system_message(bot_cfg: dict) -> str:
-    return (bot_cfg or {}).get("system_prompt", "") or ""
+    return (bot_cfg or {}).get("system_prompt") or (bot_cfg or {}).get("prompt") or ""
 
 # =======================
 #  Helpers de links por BOT
@@ -1631,7 +1680,7 @@ def _voice_get_bot_config(to_number: str) -> dict:
     config = {
         "bot_name": bot_cfg.get("name", "Unknown"),
         "model": bot_cfg.get("model", "gpt-4o"),
-        "system_prompt": bot_cfg.get("system_prompt", "Eres un asistente de voz amable y natural. Habla con una voz humana."),
+        "system_prompt": (bot_cfg.get("system_prompt") or bot_cfg.get("prompt") or ""),
         "voice_greeting": bot_cfg.get("voice_greeting", f"Hola, soy el asistente de {bot_cfg.get('business_name', bot_cfg.get('name', 'el bot'))}. ¿Cómo puedo ayudarte?"),
         "openai_voice": bot_cfg.get("realtime", {}).get("voice", "nova"),
     }
