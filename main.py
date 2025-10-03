@@ -41,6 +41,10 @@ from firebase_admin import messaging as fcm
 from avatar_realtime import bp as realtime_bp
 from avatar_profiles import bp as profiles_bp
 
+from voice_realtime import bp as voice_rt_bp
+app.register_blueprint(voice_rt_bp)
+
+
 # Se eliminan las dependencias de WebSocket porque no funcionaban
 # import base64
 # import struct
