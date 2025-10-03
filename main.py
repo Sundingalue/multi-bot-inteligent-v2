@@ -91,10 +91,7 @@ if APP_DOWNLOAD_URL_FALLBACK and not _valid_url(APP_DOWNLOAD_URL_FALLBACK):
     print(f"⚠️ APP_DOWNLOAD_URL_FALLBACK inválido: '{APP_DOWNLOAD_URL_FALLBACK}'")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
-app = Flask(__name__)
 # Registro del Blueprint para Avatar Realtime
-app.register_blueprint(realtime_bp)
-app.register_blueprint(profiles_bp)
 # --- Exponer recursos al Blueprint de Instagram ---
 app.secret_key = "supersecreto_sundin_panel_2025"
 
