@@ -1,9 +1,21 @@
 {
   "whatsapp:+18326213202": {
     "name": "Nina",
-    "business_name": "In Houston",
+    "business_name": "Houston School of Esthetics & Massage",
     "model": "gpt-4o",
     "temperature": 0.6,
+
+    "agent": {
+      "name": "Sarah",
+      "role": "Asistente Virtual",
+      "persona": "Amable, servicial, motivadora, profesional"
+    },
+
+    "realtime": {
+      "model": "gpt-4o-realtime-preview-2024-12-17",
+      "voice": "cedar"
+
+    },
 
     "auth": {
       "username": "fit2025",
