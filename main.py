@@ -1,13 +1,12 @@
 # main.py — core genérico (sin conocimiento de marca en el core)
 
 # 💥💥 CORRECCIÓN FINAL 💥💥
-# ❌ No usamos eventlet.monkey_patch() aquí
-# import eventlet
-# eventlet.monkey_patch()
+# Usar monkey_patch de eventlet en lugar de gevent
+import eventlet
+eventlet.monkey_patch()
 
 # Resto de importaciones
-from flask import Flask, request, session, redirect, url_for, send_file, send_from_directory, jsonify, render_template, make_response, Response
-import pathlib
+from flask import Flask, request, session, redirect, url_for, send_file, jsonify, render_template, make_response, Response
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import VoiceResponse, Gather, Connect
 from openai import OpenAI
@@ -27,6 +26,7 @@ import html
 import uuid
 import requests
 
+
 # 🔹 Twilio REST (para enviar mensajes manuales desde el panel)
 from twilio.rest import Client as TwilioClient
 
@@ -36,37 +36,39 @@ from firebase_admin import credentials, db
 # 🔹 NEW: FCM (para notificaciones push)
 from firebase_admin import messaging as fcm
 
-# --- Cargar variables de entorno (incluye Secret File de Render si existe) ---
+# 🔹 Avatar Realtime (sesión efímera para “Hablar ahora”)
+from avatar_realtime import bp as realtime_bp
+
+
+# Se eliminan las dependencias de WebSocket porque no funcionaban
+# import base64
+# import struct
+# import ssl
+# from threading import Event
+# import urllib.parse
+# try:
+#     from flask_sock import Sock
+#     import websocket
+# except Exception as _e:
+#     pass
+
+# =======================
+#  Cargar variables de entorno (Render -> Secret File)
+# =======================
 load_dotenv("/etc/secrets/.env")
 load_dotenv()
 
-OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip()
-client = OpenAI(api_key=OPENAI_API_KEY)
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") or ""
 
-# ✅ Crear la app ANTES de registrar los blueprints
-app = Flask(__name__)
-
-# 🔹 Blueprints (rutas externas)
-from avatar_realtime import bp as realtime_bp
-from avatar_profiles import bp as profiles_bp
-from voice_realtime import bp as voice_rt_bp
-
-# ✅ Registrar los blueprints
-app.register_blueprint(realtime_bp)       # /realtime/*
-app.register_blueprint(profiles_bp)       # /profiles/*
-app.register_blueprint(voice_rt_bp)       # /voice-realtime/*
-
-
-# =======================
-#  Cargar variables de entorno adicionales (Twilio, fallbacks, token)
-# =======================
+# Twilio REST creds (necesarias para enviar mensajes OUTBOUND)
 TWILIO_ACCOUNT_SID = (os.environ.get("TWILIO_ACCOUNT_SID") or "").strip()
 TWILIO_AUTH_TOKEN  = (os.environ.get("TWILIO_AUTH_TOKEN") or "").strip()
 
+# Fallbacks globales (se usan SOLO si el bot no trae link en su JSON ni hay variable de entorno)
 BOOKING_URL_FALLBACK = (os.environ.get("BOOKING_URL", "").strip())
 APP_DOWNLOAD_URL_FALLBACK = (os.environ.get("APP_DOWNLOAD_URL", "").strip())
 
-# 🔐 Bearer opcional para proteger endpoints /push/* y API móvil
+# 🔐 NEW (opcional): Bearer para proteger endpoints /push/* y (ahora) API móvil
 API_BEARER_TOKEN = (os.environ.get("API_BEARER_TOKEN") or "").strip()
 
 def _valid_url(u: str) -> bool:
@@ -77,33 +79,12 @@ if BOOKING_URL_FALLBACK and not _valid_url(BOOKING_URL_FALLBACK):
 if APP_DOWNLOAD_URL_FALLBACK and not _valid_url(APP_DOWNLOAD_URL_FALLBACK):
     print(f"⚠️ APP_DOWNLOAD_URL_FALLBACK inválido: '{APP_DOWNLOAD_URL_FALLBACK}'")
 
-# --- Secret key del panel ---
+client = OpenAI(api_key=OPENAI_API_KEY)
+app = Flask(__name__)
+# Registro del Blueprint para Avatar Realtime
+app.register_blueprint(realtime_bp)
+# --- Exponer recursos al Blueprint de Instagram ---
 app.secret_key = "supersecreto_sundin_panel_2025"
-
-# === JSON de Tarjeta Inteligente (sirve archivos desde bots/tarjeta_inteligente) ===
-JSON_DIR = os.path.join(os.path.dirname(__file__), "bots", "tarjeta_inteligente")
-
-# 1) Sirve los JSON crudos (ej: /clients/sundin.json)
-@app.route("/clients/<path:filename>", methods=["GET"])
-def clients_static(filename):
-    return send_from_directory(JSON_DIR, filename, mimetype="application/json")
-
-# 2) API normalizada por slug (ej: /api/avatar/sundin.json)
-@app.route("/api/avatar/<slug>.json", methods=["GET"])
-def api_avatar(slug):
-    fp = os.path.join(JSON_DIR, f"{slug}.json")
-    if not os.path.isfile(fp):
-        return jsonify({"error": "Perfil no encontrado"}), 404
-    with open(fp, "r", encoding="utf-8") as f:
-        data = json.load(f) or {}
-    # Asegura campos mínimos
-    data.setdefault("slug", slug)
-    data.setdefault("endpoints", {}).setdefault(
-        "realtime_session",
-        "https://multi-bot-inteligente-v1.onrender.com/realtime/session"
-    )
-    return jsonify(data)
-
 
 # ✅ Sesión persistente (remember me)
 app.permanent_session_lifetime = timedelta(days=60)
@@ -112,21 +93,12 @@ app.config.update({
     "SESSION_COOKIE_SECURE": False if os.getenv("DEV_HTTP", "").lower() == "true" else True
 })
 
-# 🌐 CORS básico para llamadas desde WordPress / app
-ALLOWED_ORIGINS = {
-    "https://inhoustontexas.us",
-    "https://www.inhoustontexas.us"
-}
-
+# 🌐 NEW: CORS básico para llamadas desde WordPress / app
 @app.after_request
 def add_cors_headers(resp):
-    origin = request.headers.get("Origin", "")
-    if origin in ALLOWED_ORIGINS:
-        resp.headers["Access-Control-Allow-Origin"] = origin
-        resp.headers["Vary"] = "Origin"
+    resp.headers["Access-Control-Allow-Origin"] = "*"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    resp.headers["Access-Control-Max-Age"] = "86400"
     return resp
 
 def _bearer_ok(req) -> bool:
@@ -135,7 +107,6 @@ def _bearer_ok(req) -> bool:
         return True
     auth = (req.headers.get("Authorization") or "").strip()
     return auth == f"Bearer {API_BEARER_TOKEN}"
-
 
 # =======================
 #  Inicializar Firebase
@@ -164,7 +135,6 @@ if not firebase_admin._apps:
         firebase_admin.initialize_app(cred)
         print("⚠️ Firebase inicializado sin databaseURL (db.reference fallará hasta configurar FIREBASE_DB_URL).")
 
-
 # =======================
 #  Twilio REST Client (para respuestas manuales)
 # =======================
@@ -177,7 +147,6 @@ if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
         print(f"⚠️ No se pudo inicializar Twilio REST client: {e}")
 else:
     print("⚠️ TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN no configurados. El envío manual desde panel no funcionará hasta configurarlos.")
-
 
 # =======================
 #  Cargar bots desde carpeta bots/
@@ -199,23 +168,20 @@ bots_config = load_bots_folder()
 if not bots_config:
     print("⚠️ No se encontraron bots en ./bots/*.json")
 
-# --- Exponer recursos a otros blueprints que los lean vía current_app.config ---
-app.config["BOTS_CONFIG"] = bots_config
-app.config["OPENAI_CLIENT"] = client
-
-
 # =======================
-#  💡 Registrar la API de facturación e Instagram (Blueprints)
+#  💡 Registrar la API de facturación (Blueprint)
 # =======================
 from bots.api_mobile import mobile_bp
 from instagram_webhook import ig_bp
-from instagram_api_multi import ig_multi_bp
+from instagram_api_multi import ig_multi_bp   # 👈 Import nuevo aquí
 from billing_api import billing_bp
 
 app.register_blueprint(mobile_bp, url_prefix="/api/mobile")
 app.register_blueprint(ig_bp)  # expone /webhook_instagram (GET verificación, POST eventos)
-app.register_blueprint(ig_multi_bp, url_prefix="/api/instagram_bot")
+app.register_blueprint(ig_multi_bp, url_prefix="/api/instagram_bot")  # 👈 Registro aquí
 app.register_blueprint(billing_bp, url_prefix="/billing")
+
+
 
 
 # =======================
@@ -227,13 +193,13 @@ follow_up_flags = {}         # clave_sesion -> {"5min": bool, "60min": bool}
 agenda_state = {}            # clave_sesion -> {"awaiting_confirm": bool, "status": str, "last_update": ts, "last_link_time": ts, "last_bot_hash": "", "closed": bool}
 greeted_state = {}           # clave_sesion -> bool (si ya se saludó)
 
-# ✅ VOZ
+# ✅ CORRECCIÓN: Definición de variables globales para la voz
 voice_call_cache = {}
 voice_conversation_history = {}
 
 
 # =======================
-#  Helpers generales
+#  Helpers generales (neutros)
 # =======================
 def _hora_to_epoch_ms(hora_str: str) -> int:
     try:
@@ -260,6 +226,7 @@ def _get_bot_cfg_by_name(name: str):
 def _get_bot_cfg_by_number(to_number: str):
     return bots_config.get(to_number)
 
+# ✅ VOICE helper: canonizar número a E.164 (+1...)
 def _canonize_phone(raw: str) -> str:
     s = str(raw or "").strip()
     for p in ("whatsapp:", "tel:", "sip:", "client:"):
@@ -274,17 +241,23 @@ def _canonize_phone(raw: str) -> str:
         digits = "1" + digits
     return "+" + digits
 
+# ✅ VOICE helper: encuentra bot por número (E.164 o whatsapp:+)
 def _get_bot_cfg_by_any_number(to_number: str):
     if not to_number:
         if len(bots_config) == 1:
             return list(bots_config.values())[0]
+    
+    # ✅ CORRECCIÓN FINAL: Buscar por E.164 para mayor compatibilidad
     canon_to = _canonize_phone(to_number)
     for key, cfg in bots_config.items():
         if _canonize_phone(key) == canon_to:
             return cfg
+    
     return bots_config.get(to_number)
 
+
 def _get_bot_number_by_name(bot_name: str) -> str:
+    """Devuelve la clave 'whatsapp:+1...' de bots_config para un nombre de bot dado."""
     for number_key, cfg in bots_config.items():
         if isinstance(cfg, dict) and cfg.get("name", "").strip().lower() == (bot_name or "").strip().lower():
             return number_key
@@ -327,8 +300,7 @@ def _ensure_question(bot_cfg: dict, text: str, force_question: bool) -> str:
     return f"{txt} {probe}".strip() if probe else txt
 
 def _make_system_message(bot_cfg: dict) -> str:
-    return (bot_cfg or {}).get("system_prompt") or (bot_cfg or {}).get("prompt") or ""
-
+    return (bot_cfg or {}).get("system_prompt", "") or ""
 
 # =======================
 #  Helpers de links por BOT
@@ -372,7 +344,6 @@ def _effective_app_url(bot_cfg: dict) -> str:
         if _valid_url(val):
             return val
     return APP_DOWNLOAD_URL_FALLBACK if _valid_url(APP_DOWNLOAD_URL_FALLBACK) else ""
-
 
 # =======================
 #  Intenciones
@@ -420,6 +391,21 @@ def _minutes_since(ts): return (_now() - int(ts or 0)) / 60.0
 def _hash_text(s: str) -> str:
     return hashlib.md5((s or "").strip().lower().encode("utf-8")).hexdigest()
 
+def _get_agenda(clave):
+    return agenda_state.get(clave) or {"awaiting_confirm": False, "status": "none", "last_update": 0, "last_link_time": 0, "last_bot_hash": "", "closed": False}
+
+def _set_agenda(clave, **kw):
+    st = _get_agenda(clave)
+    st.update(kw)
+    st["last_update"] = _now()
+    agenda_state[clave] = st
+    return st
+
+def _can_send_link(clave, cooldown_min=10):
+    st = _get_agenda(clave)
+    if st.get("status") in ("link_sent", "confirmed") and _minutes_since(st.get("last_link_time")) < cooldown_min:
+        return False
+    return True
 
 # =======================
 #  Firebase: helpers de leads
@@ -450,33 +436,25 @@ def fb_append_historial(bot_nombre, numero, entrada):
     ref.set(lead)
 
 def fb_list_leads_all():
-    """
-    Estructura esperada en Firebase:
-      leads/
-        {bot_nombre}/
-          {numero}/ -> {...}
-    """
     root = db.reference("leads").get() or {}
     leads = {}
     if not isinstance(root, dict):
         return leads
-    for bot_nombre, numeros in root.items():
-        if not isinstance(numeros, dict):
-            continue
-        for numero, data in numeros.items():
-            if str(numero).startswith("ig:"):
-                continue  # 🧽 Excluir leads de Instagram
-            clave = f"{bot_nombre}|{numero}"
-            leads[clave] = {
-                "bot": bot_nombre,
-                "numero": numero,
-                "first_seen": data.get("first_seen", ""),
-                "last_message": data.get("last_message", ""),
-                "last_seen": data.get("last_seen", ""),
-                "messages": int(data.get("messages", 0)),
-                "status": data.get("status", "nuevo"),
-                "notes": data.get("notes", "")
-            }
+    for numero, data in numeros.items():
+     if str(numero).startswith("ig:"):
+        continue  # 🧽 Excluir leads de Instagram
+    clave = f"{bot_nombre}|{numero}"
+    leads[clave] = {
+        "bot": bot_nombre,
+        "numero": numero,
+        "first_seen": data.get("first_seen", ""),
+        "last_message": data.get("last_message", ""),
+        "last_seen": data.get("last_seen", ""),
+        "messages": int(data.get("messages", 0)),
+        "status": data.get("status", "nuevo"),
+        "notes": data.get("notes", "")
+    }
+
     return leads
 
 def fb_list_leads_by_bot(bot_nombre):
@@ -485,6 +463,7 @@ def fb_list_leads_by_bot(bot_nombre):
     if not isinstance(numeros, dict):
         return leads
     for numero, data in numeros.items():
+        # 🧽 Excluir leads de Instagram
         if str(numero).startswith("ig:"):
             continue
         clave = f"{bot_nombre}|{numero}"
@@ -500,6 +479,8 @@ def fb_list_leads_by_bot(bot_nombre):
         }
     return leads
 
+
+# ✅ NUEVO: eliminar lead completo
 def fb_delete_lead(bot_nombre, numero):
     try:
         _lead_ref(bot_nombre, numero).delete()
@@ -507,7 +488,14 @@ def fb_delete_lead(bot_nombre, numero):
     except Exception as e:
         print(f"❌ Error eliminando lead {bot_nombre}/{numero}: {e}")
         return False
+    
+    # --- Exponer recursos al Blueprint de Instagram ---
+app.config["BOTS_CONFIG"] = bots_config
+app.config["OPENAI_CLIENT"] = client
+app.config["FB_APPEND_HISTORIAL"] = fb_append_historial
 
+
+# ✅ NUEVO: vaciar solo el historial (mantener lead)
 def fb_clear_historial(bot_nombre, numero):
     try:
         ref = _lead_ref(bot_nombre, numero)
@@ -526,9 +514,8 @@ def fb_clear_historial(bot_nombre, numero):
         print(f"❌ Error vaciando historial {bot_nombre}/{numero}: {e}")
         return False
 
-
 # =======================
-#  Kill-Switch GLOBAL / por conversación
+#  ✅ Kill-Switch GLOBAL por bot
 # =======================
 def fb_is_bot_on(bot_name: str) -> bool:
     try:
@@ -541,7 +528,11 @@ def fb_is_bot_on(bot_name: str) -> bool:
         print(f"⚠️ Error leyendo status del bot '{bot_name}': {e}")
     return True  # si no hay dato, asumimos ON
 
+# =======================
+#  ✅ NUEVO: Kill-Switch por conversación (ON/OFF individual)
+# =======================
 def fb_is_conversation_on(bot_nombre: str, numero: str) -> bool:
+    """Devuelve True si la conversación tiene el bot activado; si no existe el flag, asume ON."""
     try:
         ref = _lead_ref(bot_nombre, numero)
         lead = ref.get() or {}
@@ -565,9 +556,8 @@ def fb_set_conversation_on(bot_nombre: str, numero: str, enabled: bool):
         print(f"⚠️ Error guardando bot_enabled en {bot_nombre}/{numero}: {e}")
         return False
 
-
 # =======================
-#  Hidratar sesión desde Firebase
+#  🔄 Hidratar sesión desde Firebase (evita perder contexto tras reinicios)
 # =======================
 def _hydrate_session_from_firebase(clave_sesion: str, bot_cfg: dict, sender_number: str):
     if clave_sesion in session_history:
@@ -598,7 +588,6 @@ def _hydrate_session_from_firebase(clave_sesion: str, bot_cfg: dict, sender_numb
         greeted_state[clave_sesion] = True
     follow_up_flags[clave_sesion] = {"5min": False, "60min": False}
 
-
 # =======================
 #  Rutas UI: Paneles
 # =======================
@@ -609,9 +598,11 @@ def _load_users():
     2) Variables de entorno (LEGACY): USER_*, PASS_*, PANEL_*
     3) Usuario por defecto (admin total)
     """
+    # ===== 1) Desde bots/*.json =====
     users_from_json = {}
 
     def _normalize_list_scope(scope_val):
+        # Devuelve lista de bots permitidos o ["*"] si es admin global
         if isinstance(scope_val, str):
             scope_val = scope_val.strip()
             if scope_val == "*":
@@ -629,7 +620,7 @@ def _load_users():
                 allowed.append(_normalize_bot_name(s) or s)
             return allowed or []
         else:
-            return []
+            return []  # sin scope válido
 
     for cfg in bots_config.values():
         if not isinstance(cfg, dict):
@@ -638,18 +629,20 @@ def _load_users():
         if not bot_name:
             continue
 
+        # Soporta "login": {...}, "logins": [{...}, ...] y "auth": {...} (alias)
         logins = []
         if isinstance(cfg.get("login"), dict):
             logins.append(cfg["login"])
         if isinstance(cfg.get("logins"), list):
             logins.extend([x for x in cfg["logins"] if isinstance(x, dict)])
-        if isinstance(cfg.get("auth"), dict):
+        if isinstance(cfg.get("auth"), dict):  # 🔹 alias compatible
             logins.append(cfg["auth"])
 
         for entry in logins:
             username = (entry.get("username") or "").strip()
             password = (entry.get("password") or "").strip()
 
+            # scope explícito o derivado del "panel" (panel/panel-bot/NOMBRE)
             scope_val = entry.get("scope")
             panel_hint = (entry.get("panel") or "").strip().lower()
 
@@ -669,6 +662,7 @@ def _load_users():
             if not allowed_bots:
                 allowed_bots = [bot_name]
 
+            # Merge si el mismo usuario aparece en varios JSON
             if username in users_from_json:
                 prev_bots = users_from_json[username].get("bots", [])
                 if "*" in prev_bots or "*" in allowed_bots:
@@ -684,6 +678,7 @@ def _load_users():
     if users_from_json:
         return users_from_json
 
+    # ===== 2) LEGACY: variables de entorno =====
     env_users = {}
     for key, val in os.environ.items():
         if not key.startswith("USER_"):
@@ -709,6 +704,7 @@ def _load_users():
     if env_users:
         return env_users
 
+    # ===== 3) Fallback ultra-básico (admin total) =====
     return {"sundin": {"password": "inhouston2025", "bots": ["*"]}}
 
 def _auth_user(username, password):
@@ -772,12 +768,16 @@ def login_html_redirect():
 def panel():
     if not session.get("autenticado"):
         if request.method == "POST":
+            # ✅ Acepta 'usuario' y también 'username' o 'email' (compatibilidad con gestores iOS/Android)
             usuario = (request.form.get("usuario") or request.form.get("username") or request.form.get("email") or "").strip()
+
+            # ✅ Acepta 'clave' o 'password' (para mejores prompts del navegador)
             clave = request.form.get("clave")
             if clave is None or clave == "":
-                clave = request.form.get("password")
+                clave = request.form.get("password")  # por si el input se llama 'password'
             clave = (clave or "").strip()
 
+            # ✅ Sesión persistente si marcaron "Recuérdame"
             remember_flag = (request.form.get("recordarme") or request.form.get("remember") or "").strip().lower()
             remember_on = remember_flag in ("on", "1", "true", "yes", "si", "sí")
 
@@ -786,14 +786,18 @@ def panel():
                 session["autenticado"] = True
                 session["usuario"] = auth["username"]
                 session["bots_permitidos"] = auth["bots"]
+
+                # ✅ Sesión persistente si marcaron "Recuérdame"
                 session.permanent = bool(remember_on)
 
+                # Preparamos redirect de destino
                 if "*" in auth["bots"]:
                     destino_resp = redirect(url_for("panel"))
                 else:
                     destino = _first_allowed_bot()
                     destino_resp = redirect(url_for("panel_exclusivo_bot", bot_nombre=destino)) if destino else redirect(url_for("panel"))
 
+                # ✅ Cookies útiles para autocompletar desde el front si lo deseas
                 resp = make_response(destino_resp)
                 max_age = 60 * 24 * 60 * 60  # 60 días
                 if remember_on:
@@ -804,10 +808,13 @@ def panel():
                     resp.delete_cookie("last_username")
                 return resp
 
+            # 🔴 Login fallido
             return render_template("login.html", error=True)
 
+        # GET no autenticado -> formulario
         return render_template("login.html")
 
+    # Ya autenticado
     if not _is_admin():
         destino = _first_allowed_bot()
         if destino:
@@ -825,22 +832,28 @@ def panel():
     else:
         leads_filtrados = leads_todos
 
-    return render_template("panel.html", leads=leads_todos, bots=bots_disponibles, bot_seleccionado=bot_seleccionado)
+    return render_template("panel.html", leads=leads_todos, bots= bots_disponibles, bot_seleccionado=bot_seleccionado)
 
 @app.route("/logout", methods=["GET", "POST"])
 def logout():
     session.clear()
+    # También limpiamos las cookies de ayuda (el navegador puede conservar credenciales guardadas por su cuenta)
     resp = make_response(redirect(url_for("panel")))
     resp.delete_cookie("remember_login")
+    # Nota: si quieres conservar last_username al salir, comenta la línea siguiente
     resp.delete_cookie("last_username")
     return resp
-
 
 # ======================
 # Instagram OAuth Redirect
 # ======================
 @app.route("/ig_auth_redirect", methods=["GET"])
 def ig_auth_redirect():
+    """
+    Endpoint que Meta/Facebook llama después de un login OAuth de Instagram.
+    Aquí recibimos el parámetro 'code', lo intercambiamos por un access_token,
+    y guardamos ese token en Firebase para el usuario que hizo login.
+    """
     code = request.args.get("code")
     error = request.args.get("error")
 
@@ -850,11 +863,15 @@ def ig_auth_redirect():
         return "❌ Falta parámetro 'code' en la redirección.", 400
     return f"✅ Login Instagram exitoso. Code recibido: {code}"
 
-
 # =======================
 #  ✅ API: Intercambio de código OAuth Instagram (multiusuario)
 # =======================
+
 def api_instagram_exchange_code():
+    """
+    Recibe { "code": "...", "redirect_uri": "..." } desde Flutter.
+    Intercambia 'code' por 'access_token' y guarda en Firebase.
+    """
     data = request.json or {}
     code = (data.get("code") or "").strip()
     redirect_uri = (data.get("redirect_uri") or "").strip()
@@ -880,6 +897,7 @@ def api_instagram_exchange_code():
         if not access_token:
             return jsonify({"error": "No se obtuvo access_token", "detalle": token_data}), 400
 
+        # Guardar en Firebase: instagram_users/{user_id}
         ref = db.reference(f"instagram_users/{user_id}")
         ref.set({
             "access_token": access_token,
@@ -894,6 +912,40 @@ def api_instagram_exchange_code():
         print(f"❌ Error intercambiando code Instagram: {e}")
         return jsonify({"error": "Fallo al procesar login Instagram"}), 500
 
+
+    try:
+        # 1) Intercambiar el code por el access_token en la API de Meta
+        resp = requests.post(
+            "https://graph.facebook.com/v21.0/oauth/access_token",
+            data={
+                "client_id": os.getenv("IG_CLIENT_ID"),
+                "client_secret": os.getenv("IG_CLIENT_SECRET"),
+                "redirect_uri": "https://inhoustontexas.us/ig_auth_redirect",
+                "code": code,
+            },
+            timeout=10,
+        )
+        token_data = resp.json()
+        access_token = token_data.get("access_token")
+        user_id = token_data.get("user_id")  # Meta devuelve user_id de la cuenta IG
+
+        if not access_token:
+            return f"❌ No se recibió access_token: {token_data}", 400
+
+        # 2) Guardar en Firebase (bajo nodo users/{user_id})
+        ref = db.reference(f"instagram_users/{user_id}")
+        ref.set({
+            "access_token": access_token,
+            "user_id": user_id,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
+
+        print(f"[IG] Login exitoso para user_id={user_id}")
+        return f"✅ Login Instagram exitoso. Token guardado para user {user_id}"
+
+    except Exception as e:
+        print(f"❌ Error en intercambio de token IG: {e}")
+        return "❌ Error procesando login de Instagram", 500
 
 # =======================
 #  Guardar/Exportar
@@ -947,7 +999,6 @@ def exportar():
         ])
     output.seek(0)
     return send_file(output, mimetype="text/csv", download_name="leads.csv", as_attachment=True)
-
 
 # =======================
 #  ✅ NUEVO: Borrar / Vaciar conversaciones (protegido)
@@ -1008,15 +1059,19 @@ def api_delete_chat():
     ok = fb_delete_lead(bot_normalizado, numero)
     return jsonify({"ok": ok, "bot": bot_normalizado, "numero": numero})
 
-
 # =======================
 #  ✅ API para responder MANUALMENTE desde el panel o la APP (Bearer)
 # =======================
 @app.route("/api/send_manual", methods=["POST", "OPTIONS"])
 def api_send_manual():
+    """
+    JSON esperado: { "bot": "Sara", "numero": "whatsapp:+1786...", "texto": "Tu mensaje" }
+    Envía un mensaje por WhatsApp usando Twilio REST, lo guarda en Firebase como tipo "admin".
+    """
     if request.method == "OPTIONS":
         return ("", 204)
 
+    # ✅ Permitir acceso si hay sesión O si el Authorization Bearer es válido
     if not session.get("autenticado") and not _bearer_ok(request):
         return jsonify({"error": "No autenticado"}), 401
 
@@ -1040,11 +1095,13 @@ def api_send_manual():
         return jsonify({"error": "Twilio REST no configurado (TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN)"}), 500
 
     try:
+        # Enviar vía Twilio REST
         twilio_client.messages.create(
             from_=from_number,
             to=numero,
             body=texto
         )
+        # Guardar en historial como "admin"
         ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         fb_append_historial(bot_normalizado, numero, {"tipo": "admin", "texto": texto, "hora": ahora})
         return jsonify({"ok": True})
@@ -1052,15 +1109,19 @@ def api_send_manual():
         print(f"❌ Error enviando manualmente por Twilio: {e}")
         return jsonify({"error": "Fallo enviando el mensaje"}), 500
 
-
 # =======================
 #  ✅ API para ON/OFF por conversación (panel o APP con Bearer)
 # =======================
 @app.route("/api/conversation_bot", methods=["POST", "OPTIONS"])
 def api_conversation_bot():
+    """
+    JSON: { "bot": "Sara", "numero": "whatsapp:+1786...", "enabled": true/false }
+    Guarda el flag 'bot_enabled' en Firebase por conversación.
+    """
     if request.method == "OPTIONS":
         return ("", 204)
 
+    # ✅ Permitir sesión o Bearer
     if not session.get("autenticado") and not _bearer_ok(request):
         return jsonify({"error": "No autenticado"}), 401
 
@@ -1079,11 +1140,18 @@ def api_conversation_bot():
     ok = fb_set_conversation_on(bot_normalizado, numero, bool(enabled))
     return jsonify({"ok": bool(ok), "enabled": bool(enabled)})
 
+# =======================
+#  ✅ API ON/OFF Instagram Bot por usuario (multiusuario)
+# =======================
 
-# =======================
-#  ✅ API ON/OFF Instagram Bot por usuario (multiusuario) — helpers sin @route
-# =======================
 def api_instagram_bot_toggle():
+    """
+    JSON esperado:
+    {
+      "user_id": "123456789",   # ID de la cuenta IG (viene del login OAuth)
+      "enabled": true/false
+    }
+    """
     if not _bearer_ok(request):
         return jsonify({"error": "No autorizado"}), 401
 
@@ -1104,7 +1172,10 @@ def api_instagram_bot_toggle():
         print(f"❌ Error guardando estado IG bot {user_id}: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
+
+
 def api_instagram_bot_status(user_id):
+    """Devuelve ON/OFF del bot de Instagram para un usuario específico."""
     try:
         ref = db.reference(f"instagram_users/{user_id}")
         data = ref.get() or {}
@@ -1115,9 +1186,11 @@ def api_instagram_bot_status(user_id):
 
 
 # =======================
-#  🔔 Endpoints PUSH
+#  🔔 NEW: Endpoints PUSH (evitan HTTP 404)
 # =======================
+
 def _push_common_data(payload: dict) -> dict:
+    """Sanitiza 'data' para FCM (todos valores deben ser str)."""
     data = {}
     for k, v in (payload or {}).items():
         if v is None:
@@ -1126,7 +1199,7 @@ def _push_common_data(payload: dict) -> dict:
     return data
 
 @app.route("/push/topic", methods=["POST", "OPTIONS"])
-@app.route("/api/push/topic", methods=["POST", "OPTIONS"])
+@app.route("/api/push/topic", methods=["POST", "OPTIONS"])  # alias de compatibilidad
 def push_topic():
     if request.method == "OPTIONS":
         return ("", 204)
@@ -1138,13 +1211,14 @@ def push_topic():
     body_text = (body.get("body") or body.get("descripcion") or "").strip()
     topic = (body.get("topic") or body.get("segmento") or "todos").strip() or "todos"
 
+    # Datos opcionales para deep-link en la app
     data = _push_common_data({
-        "url": body.get("url") or body.get("link") or "",
-        "link": body.get("link") or "",
-        "screen": body.get("screen") or "",
-        "empresaId": body.get("empresaId") or "",
-        "categoria": body.get("categoria") or ""
-    })
+    "url": body.get("url") or body.get("link") or "",   # 👈 añadido
+    "link": body.get("link") or "",
+    "screen": body.get("screen") or "",
+    "empresaId": body.get("empresaId") or "",
+    "categoria": body.get("categoria") or ""
+})
 
     if not title or not body_text:
         return jsonify({"success": False, "message": "title/body requeridos"}), 400
@@ -1162,7 +1236,7 @@ def push_topic():
         return jsonify({"success": False, "message": "FCM error"}), 500
 
 @app.route("/push/token", methods=["POST", "OPTIONS"])
-@app.route("/api/push/token", methods=["POST", "OPTIONS"])
+@app.route("/api/push/token", methods=["POST", "OPTIONS"])  # alias
 def push_token():
     if request.method == "OPTIONS":
         return ("", 204)
@@ -1176,19 +1250,19 @@ def push_token():
     tokens = body.get("tokens") if isinstance(body.get("tokens"), list) else None
 
     data = _push_common_data({
-        "url": body.get("url") or body.get("link") or "",
-        "link": body.get("link") or "",
-        "screen": body.get("screen") or "",
-        "empresaId": body.get("empresaId") or "",
-        "categoria": body.get("categoria") or ""
-    })
+    "url": body.get("url") or body.get("link") or "",   # 👈 NUEVO
+    "link": body.get("link") or "",
+    "screen": body.get("screen") or "",
+    "empresaId": body.get("empresaId") or "",
+    "categoria": body.get("categoria") or ""
+})
 
     if not title or not body_text:
         return jsonify({"success": False, "message": "title/body requeridos"}), 400
 
     try:
-        if tokens and len(tokens) > 0:
-            multi = fcm.MulticastMessage(
+        if tokens and isinstance(tokens, list) and len(tokens) > 0:
+            multicast = fcm.MulticastMessage(
                 tokens=[str(t) for t in tokens if str(t).strip()],
                 notification=fcm.Notification(title=title, body=body_text),
                 data=data
@@ -1209,10 +1283,12 @@ def push_token():
         print(f"❌ Error FCM universal: {e}")
         return jsonify({"success": False, "message": "FCM error"}), 500
 
+# --- Health simple para probar rutas ---
 @app.route("/push/health", methods=["GET"])
 def push_health():
     return jsonify({"ok": True, "service": "push"})
 
+# --- Adaptador universal: acepta /push, /api/push, /push/send, /api/push/send ---
 @app.route("/push", methods=["POST", "OPTIONS"])
 @app.route("/api/push", methods=["POST", "OPTIONS"])
 @app.route("/push/send", methods=["POST", "OPTIONS"])
@@ -1224,20 +1300,22 @@ def push_universal():
         return jsonify({"success": False, "message": "Unauthorized"}), 401
 
     body = request.get_json(silent=True) or {}
+
     title = (body.get("title") or body.get("titulo") or "").strip()
     body_text = (body.get("body") or body.get("descripcion") or "").strip()
 
+    # acepta topic/segmento; token único o tokens[]
     topic = (body.get("topic") or body.get("segmento") or "").strip()
     token = (body.get("token") or "").strip()
     tokens = body.get("tokens") if isinstance(body.get("tokens"), list) else None
 
     data = _push_common_data({
-        "url": body.get("url") or body.get("link") or "",
-        "link": body.get("link") or "",
-        "screen": body.get("screen") or "",
-        "empresaId": body.get("empresaId") or "",
-        "categoria": body.get("categoria") or ""
-    })
+    "url": body.get("url") or body.get("link") or "",   # 👈 NUEVO
+    "link": body.get("link") or "",
+    "screen": body.get("screen") or "",
+    "empresaId": body.get("empresaId") or "",
+    "categoria": body.get("categoria") or ""
+})
 
     if not title or not body_text:
         return jsonify({"success": False, "message": "title/body requeridos"}), 400
@@ -1272,6 +1350,50 @@ def push_universal():
     except Exception as e:
         print(f"❌ Error FCM universal: {e}")
         return jsonify({"success": False, "message": "FCM error"}), 500
+    
+# =======================
+#  ✅ API Instagram Bot (multiusuario)
+# =======================
+
+
+def api_instagram_bot_status(user_id):
+    """
+    Devuelve si el bot de IG está ON/OFF para un usuario específico.
+    Lee desde Firebase en instagram_users/{user_id}/enabled.
+    """
+    try:
+        ref = db.reference(f"instagram_users/{user_id}")
+        data = ref.get() or {}
+        enabled = data.get("enabled", True)  # si no hay nada, asumimos ON
+        return jsonify({"user_id": user_id, "enabled": bool(enabled)})
+    except Exception as e:
+        print(f"❌ Error leyendo estado IG {user_id}: {e}")
+        return jsonify({"error": "Error interno"}), 500
+
+
+
+def api_instagram_bot_toggle():
+    """
+    Cambia el estado ON/OFF para el bot de IG de un usuario específico.
+    Espera JSON: { "user_id": "...", "enabled": true/false }
+    """
+    data = request.get_json(force=True) or {}
+    user_id = (data.get("user_id") or "").strip()
+    enabled = data.get("enabled")
+
+    if not user_id or enabled is None:
+        return jsonify({"error": "Parámetros inválidos"}), 400
+
+    try:
+        ref = db.reference(f"instagram_users/{user_id}")
+        current = ref.get() or {}
+        current["enabled"] = bool(enabled)
+        ref.set(current)
+        print(f"[IG] Bot {user_id} -> enabled={enabled}")
+        return jsonify({"ok": True, "user_id": user_id, "enabled": bool(enabled)})
+    except Exception as e:
+        print(f"❌ Error guardando estado IG {user_id}: {e}")
+        return jsonify({"error": "Error interno"}), 500
 
 
 # =======================
@@ -1468,12 +1590,7 @@ def whatsapp_bot():
                 usage_dict = getattr(completion, "to_dict", lambda: {})()
                 input_tokens = int(((usage_dict or {}).get("usage") or {}).get("prompt_tokens", 0))
                 output_tokens = int(((usage_dict or {}).get("usage") or {}).get("completion_tokens", 0))
-            # Si tienes record_openai_usage en otro módulo, impórtalo; si no, ignora silenciosamente
-            try:
-                from billing_api import record_openai_usage  # si existe
-                record_openai_usage(bot.get("name", ""), model_name, input_tokens, output_tokens)
-            except Exception:
-                pass
+            record_openai_usage(bot.get("name", ""), model_name, input_tokens, output_tokens)
         except Exception as e:
             print(f"⚠️ No se pudo registrar tokens en billing: {e}")
 
@@ -1489,36 +1606,46 @@ def whatsapp_bot():
 
     return str(response)
 
+# =======================
+#  🔊 VOZ con Twilio Gather + OpenAI Speech to Text + Chat Completion
+# =======================
 
-# =======================
-#  🔊 VOZ con Twilio Gather + OpenAI TTS
-# =======================
 def _voice_get_bot_config(to_number: str) -> dict:
+    """
+    Extrae y normaliza la configuración del bot para llamadas de voz.
+    Mejora: Busca por E.164 para mayor compatibilidad.
+    """
     canon_to = _canonize_phone(to_number)
     bot_cfg = None
     for key, cfg in bots_config.items():
         if _canonize_phone(key) == canon_to:
             bot_cfg = cfg
             break
+    
     if not bot_cfg:
         bot_cfg = bots_config.get(to_number)
+
     if not bot_cfg:
         return None
 
-    return {
+    config = {
         "bot_name": bot_cfg.get("name", "Unknown"),
         "model": bot_cfg.get("model", "gpt-4o"),
-        "system_prompt": (bot_cfg.get("system_prompt") or bot_cfg.get("prompt") or ""),
+        "system_prompt": bot_cfg.get("system_prompt", "Eres un asistente de voz amable y natural. Habla con una voz humana."),
         "voice_greeting": bot_cfg.get("voice_greeting", f"Hola, soy el asistente de {bot_cfg.get('business_name', bot_cfg.get('name', 'el bot'))}. ¿Cómo puedo ayudarte?"),
         "openai_voice": bot_cfg.get("realtime", {}).get("voice", "nova"),
     }
+    return config
 
 def _generate_and_store_greeting(call_sid: str, bot_config: dict):
+    """Genera audio con OpenAI TTS y lo guarda en /tmp. Guarda el nombre del archivo en caché."""
     try:
         greeting_text = bot_config["voice_greeting"]
         openai_voice = bot_config["openai_voice"]
+        
         temp_dir = "/tmp"
-        os.makedirs(temp_dir, exist_ok=True)
+        if not os.path.exists(temp_dir):
+            os.makedirs(temp_dir)
         greeting_file_name = f"{call_sid}_greeting.mp3"
         greeting_file_path = os.path.join(temp_dir, greeting_file_name)
 
@@ -1530,30 +1657,37 @@ def _generate_and_store_greeting(call_sid: str, bot_config: dict):
                 speed=1.0
             )
             tts_response.stream_to_file(greeting_file_path)
-
+        
+        # ✅ CORRECCIÓN: Guardar el nombre del archivo dentro de un diccionario
         voice_call_cache[f"{call_sid}_greeting"] = {"audio_file_name": greeting_file_name}
+
     except Exception as e:
         print(f"❌ Error en el hilo al generar el saludo para {call_sid}: {e}")
+        # ✅ CORRECCIÓN: Asegurar que siempre se guarde un diccionario
         voice_call_cache[f"{call_sid}_greeting"] = {"audio_file_name": ""}
 
 def _thread_target_chat(call_sid, user_speech, bot_config):
+    """Función para el hilo de procesamiento de la IA."""
     try:
         if call_sid not in voice_conversation_history:
             voice_conversation_history[call_sid] = [{"role": "system", "content": bot_config["system_prompt"]}]
+        
         voice_conversation_history[call_sid].append({"role": "user", "content": user_speech})
-
+        
         chat_completion = client.chat.completions.create(
             model=bot_config["model"],
             messages=voice_conversation_history[call_sid]
         )
         bot_response_text = chat_completion.choices[0].message.content.strip()
+        
         voice_conversation_history[call_sid].append({"role": "assistant", "content": bot_response_text})
 
         temp_dir = "/tmp"
-        os.makedirs(temp_dir, exist_ok=True)
+        if not os.path.exists(temp_dir):
+            os.makedirs(temp_dir)
         audio_file_name = f"{call_sid}_{uuid.uuid4().hex[:8]}.mp3"
         audio_file_path = os.path.join(temp_dir, audio_file_name)
-
+        
         tts_response = client.audio.speech.create(
             model="tts-1",
             voice=bot_config["openai_voice"],
@@ -1562,19 +1696,24 @@ def _thread_target_chat(call_sid, user_speech, bot_config):
         )
         tts_response.stream_to_file(audio_file_path)
 
+        # Guardar el nombre del archivo en la caché
         voice_call_cache[call_sid] = {"audio_file_name": audio_file_name}
+        
     except Exception as e:
         print(f"❌ Error en el hilo de chat con OpenAI: {e}")
         voice_call_cache[call_sid] = {"audio_file_name": ""}
 
 def _wait_for_audio(call_sid, cache_key, timeout=15):
+    """Espera hasta que el hilo haya generado el audio o se agote el tiempo."""
     start_time = time.time()
     while cache_key not in voice_call_cache and (time.time() - start_time) < timeout:
         time.sleep(0.1)
+    
     if cache_key in voice_call_cache:
         return voice_call_cache[cache_key].get("audio_file_name", "")
     return ""
 
+# 1. Webhook inicial para la llamada entrante
 @app.route("/voice", methods=["POST"])
 def voice_webhook():
     to_number = request.values.get("To")
@@ -1587,25 +1726,34 @@ def voice_webhook():
         return str(resp)
 
     print(f"[VOICE] Llamada a '{bot_config['bot_name']}' iniciada.")
-
+    
+    # ✅ CORRECCIÓN: Iniciar el procesamiento del saludo en un hilo separado
+    # Se añade la entrada a voice_call_cache para que el hilo sepa dónde guardar el resultado
     voice_call_cache[f"{call_sid}_greeting"] = {"audio_file_name": "placeholder"}
     Thread(target=_generate_and_store_greeting, args=(call_sid, bot_config), daemon=True).start()
 
     resp = VoiceResponse()
+    # Usar <Gather> para escuchar la respuesta del usuario
     gather = Gather(
-        input="speech",
+        input="speech", 
         action=url_for('voice_gather', _external=True),
         speech_model="phone_call",
         speech_timeout="auto",
         language="es-ES"
     )
+    # Se omite el .say() para evitar que twilio genere audio robotico
     resp.append(gather)
+    
+    # Se redirige inmediatamente para ir al "gather" que espera el saludo
     resp.redirect(url_for('voice_gather', _external=True))
+    
     return str(resp)
 
+# 2. Webhook para procesar el audio del usuario
 @app.route("/voice-gather", methods=["POST"])
 def voice_gather():
     resp = VoiceResponse()
+    
     user_speech = request.values.get("SpeechResult", "").strip()
     call_sid = request.values.get("CallSid")
     to_number = request.values.get("To")
@@ -1614,16 +1762,24 @@ def voice_gather():
     if not bot_config:
         resp.say("Lo siento, hubo un problema técnico.")
         return str(resp)
-
+        
     if user_speech:
         print(f"[VOICE] Mensaje del usuario: {user_speech}")
-        Thread(target=_thread_target_chat, args=(call_sid, user_speech, bot_config), daemon=True).start()
+        
+        # ✅ CORRECCIÓN: Iniciar el procesamiento de la IA en un hilo separado
+        _thread_target_chat(call_sid, user_speech, bot_config)
         audio_file_name = _wait_for_audio(call_sid, call_sid, timeout=15)
+        
         if audio_file_name:
+            print(f"[VOICE] Reproduciendo respuesta del bot desde: {audio_file_name}")
             resp.play(f"{request.host_url}voice-audio/{audio_file_name}")
         else:
+            print(f"❌ Error: No se pudo obtener la URL de audio a tiempo.")
             resp.say("Lo siento, estoy teniendo un problema y no pude responder.")
+        
     else:
+        # ✅ CORRECCIÓN: En la primera llamada a voice_gather, el usuario no ha hablado,
+        # así que reproducimos el saludo.
         greeting_file_name = _wait_for_audio(call_sid, f"{call_sid}_greeting")
         if greeting_file_name:
             resp.play(f"{request.host_url}voice-audio/{greeting_file_name}")
@@ -1631,15 +1787,17 @@ def voice_gather():
             resp.say("Lo siento, no pude generar el saludo.")
 
     gather = Gather(
-        input="speech",
-        action=url_for('voice_gather', _external=True),
+        input="speech", 
+        action=url_for('voice_gather', _external=True), 
         speech_model="phone_call",
         speech_timeout="auto",
         language="es-ES"
     )
     resp.append(gather)
+    
     return str(resp)
 
+# 3. Endpoint para servir el archivo de audio
 @app.route("/voice-audio/<filename>", methods=["GET"])
 def voice_audio(filename):
     file_path = os.path.join("/tmp", filename)
@@ -1648,7 +1806,6 @@ def voice_audio(filename):
     else:
         print(f"❌ Error 404: Archivo no encontrado en {file_path}")
         return "Archivo no encontrado", 404
-
 
 # =======================
 #  Vistas de conversación (leen Firebase)
@@ -1695,15 +1852,15 @@ def chat_bot(bot, numero):
 
     return render_template("chat_bot.html", numero=numero, mensajes=mensajes, bot=bot_normalizado, bot_data=bot_cfg, company_name=company_name)
 
-
 # =======================
-#  API de polling (leen Firebase) — permite Bearer
+#  API de polling (leen Firebase) — ahora permite Bearer
 # =======================
 @app.route("/api/chat/<bot>/<numero>", methods=["GET", "OPTIONS"])
 def api_chat(bot, numero):
     if request.method == "OPTIONS":
         return ("", 204)
 
+    # ✅ Permitir sesión o Bearer
     if not session.get("autenticado") and not _bearer_ok(request):
         return jsonify({"error": "No autenticado"}), 401
 
@@ -1740,9 +1897,10 @@ def api_chat(bot, numero):
                 last_ts = ts
         nuevos = [{"texto": reg.get("texto", ""), "hora": reg.get("hora", ""), "tipo": reg.get("tipo", "user"), "ts": _hora_to_epoch_ms(reg.get("hora", ""))} for reg in historial]
 
+    # ✅ Adjuntamos estado ON/OFF por conversación para que el front muestre el botón correcto
     bot_enabled = fb_is_conversation_on(bot_normalizado, numero)
-    return jsonify({"mensajes": nuevos, "last_ts": last_ts, "bot_enabled": bool(bot_enabled)})
 
+    return jsonify({"mensajes": nuevos, "last_ts": last_ts, "bot_enabled": bool(bot_enabled)})
 
 # =======================
 #  Run
