@@ -10,6 +10,10 @@ bp = Blueprint("voice_realtime", __name__, url_prefix="/voice-realtime")
 # Carpeta temporal para audios
 TMP_DIR = "/tmp"
 
+# Dominio público para Twilio (Render)
+PUBLIC_URL = os.getenv("PUBLIC_URL", "https://multi-bot-inteligente-v1.onrender.com")
+
+# ────────────────────────────────────────────────
 # Llamada entrante
 @bp.route("/call", methods=["POST"])
 def handle_incoming_call():
@@ -25,7 +29,7 @@ def handle_incoming_call():
     # Espera respuesta del usuario (Gather con URL absoluta)
     gather = Gather(
         input="speech",
-        action=f"{request.url_root}voice-realtime/response",
+        action=f"{PUBLIC_URL}/voice-realtime/response",
         method="POST",
         language="es-ES",
         timeout=5
@@ -35,6 +39,7 @@ def handle_incoming_call():
 
     return Response(str(resp), mimetype="text/xml")
 
+# ────────────────────────────────────────────────
 # Respuesta después del Gather
 @bp.route("/response", methods=["POST"])
 def handle_response():
@@ -76,11 +81,12 @@ def handle_response():
 
     # Twilio responde con <Play> usando URL pública
     resp = VoiceResponse()
-    resp.play(f"{request.url_root}voice-realtime/media/{filename}")
+    resp.play(f"{PUBLIC_URL}/voice-realtime/media/{filename}")
     resp.say("¿Quiere más información? Puede hacer otra pregunta.")
 
     return Response(str(resp), mimetype="text/xml")
 
+# ────────────────────────────────────────────────
 # Servir archivos temporales para Twilio
 @bp.route("/media/<filename>", methods=["GET"])
 def serve_media(filename):
