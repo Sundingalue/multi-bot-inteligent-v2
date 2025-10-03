@@ -36,6 +36,13 @@ from firebase_admin import credentials, db
 # 🔹 NEW: FCM (para notificaciones push)
 from firebase_admin import messaging as fcm
 
+# --- Cargar variables de entorno (incluye Secret File de Render si existe) ---
+load_dotenv("/etc/secrets/.env")
+load_dotenv()
+
+OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip()
+client = OpenAI(api_key=OPENAI_API_KEY)
+
 # ✅ Crear la app ANTES de registrar los blueprints
 app = Flask(__name__)
 
@@ -48,6 +55,7 @@ from voice_realtime import bp as voice_rt_bp
 app.register_blueprint(realtime_bp)       # /realtime/*
 app.register_blueprint(profiles_bp)       # /profiles/*
 app.register_blueprint(voice_rt_bp)       # /voice-realtime/*
+
 
 
 
