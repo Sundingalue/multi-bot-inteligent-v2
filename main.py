@@ -95,6 +95,7 @@ app = Flask(__name__)
 # Registro del Blueprint para Avatar Realtime
 app.register_blueprint(realtime_bp)
 app.register_blueprint(profiles_bp)
+app.register_blueprint(voice_rt_bp)  # ✅ (AÑADIDO) re-montar /voice-realtime/* tras la segunda creación de app
 # --- Exponer recursos al Blueprint de Instagram ---
 app.secret_key = "supersecreto_sundin_panel_2025"
 
@@ -489,21 +490,25 @@ def fb_list_leads_all():
     leads = {}
     if not isinstance(root, dict):
         return leads
-    for numero, data in numeros.items():
-     if str(numero).startswith("ig:"):
-        continue  # 🧽 Excluir leads de Instagram
-    clave = f"{bot_nombre}|{numero}"
-    leads[clave] = {
-        "bot": bot_nombre,
-        "numero": numero,
-        "first_seen": data.get("first_seen", ""),
-        "last_message": data.get("last_message", ""),
-        "last_seen": data.get("last_seen", ""),
-        "messages": int(data.get("messages", 0)),
-        "status": data.get("status", "nuevo"),
-        "notes": data.get("notes", "")
-    }
-
+    # ✅ (ARREGLO) iterar correctamente por bot -> numeros
+    for bot_nombre, numeros in root.items():
+        if not isinstance(numeros, dict):
+            continue
+        for numero, data in numeros.items():
+            # 🧽 Excluir leads de Instagram
+            if str(numero).startswith("ig:"):
+                continue
+            clave = f"{bot_nombre}|{numero}"
+            leads[clave] = {
+                "bot": bot_nombre,
+                "numero": numero,
+                "first_seen": data.get("first_seen", ""),
+                "last_message": data.get("last_message", ""),
+                "last_seen": data.get("last_seen", ""),
+                "messages": int(data.get("messages", 0)),
+                "status": data.get("status", "nuevo"),
+                "notes": data.get("notes", "")
+            }
     return leads
 
 def fb_list_leads_by_bot(bot_nombre):
@@ -1311,12 +1316,12 @@ def push_token():
 
     try:
         if tokens and isinstance(tokens, list) and len(tokens) > 0:
-            multicast = fcm.MulticastMessage(
+            multicast = fcm.MulticastMessage(  # ← nombre consistente
                 tokens=[str(t) for t in tokens if str(t).strip()],
                 notification=fcm.Notification(title=title, body=body_text),
                 data=data
             )
-            resp = fcm.send_multicast(multi)
+            resp = fcm.send_multicast(multicast)  # ✅ usar la misma variable
             return jsonify({"success": True, "mode": "tokens", "sent": resp.success_count, "failed": resp.failure_count})
         elif token:
             msg = fcm.Message(
