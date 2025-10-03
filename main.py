@@ -39,15 +39,15 @@ from firebase_admin import messaging as fcm
 # ✅ Crear la app ANTES de registrar los blueprints
 app = Flask(__name__)
 
-# 🔹 Avatar Realtime (sesión efímera para “Hablar ahora”)
+# 🔹 Blueprints (rutas externas)
 from avatar_realtime import bp as realtime_bp
 from avatar_profiles import bp as profiles_bp
 from voice_realtime import bp as voice_rt_bp
 
 # ✅ Registrar los blueprints
-app.register_blueprint(realtime_bp)
-app.register_blueprint(profiles_bp)
-app.register_blueprint(voice_rt_bp)
+app.register_blueprint(realtime_bp)       # /realtime/*
+app.register_blueprint(profiles_bp)       # /profiles/*
+app.register_blueprint(voice_rt_bp)       # /voice-realtime/*
 
 
 
