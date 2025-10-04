@@ -1,9 +1,19 @@
 # voice_webrtc_bridge.py
-import os, json, base64, audioop, time
+# Bridge Twilio <Stream> (PCMU 8k) ↔ OpenAI Realtime WS (PCM16 16k)
+# Sin 'audioop' (eliminado en Python 3.13). Usamos NumPy.
+
+import os, json, base64, time
 from flask import Blueprint, request, Response, current_app, url_for
 from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
 import websocket  # websocket-client
 from threading import Thread
+
+try:
+    import numpy as np
+except Exception as e:
+    raise RuntimeError(
+        "Falta NumPy para el bridge de audio. Agrega 'numpy' a requirements.txt"
+    ) from e
 
 bp = Blueprint("voice_webrtc", __name__, url_prefix="/voice-webrtc")
 
@@ -29,18 +39,77 @@ def _get_bot_cfg_by_any_number(bots_config: dict, to_number: str):
             return cfg
     return (bots_config or {}).get(to_number)
 
-# ---------- Conversión de audio ----------
-# Twilio envía 8kHz μ-law; OpenAI WS Realtime espera PCM16 (recomendado 16k).
-# Usamos audioop (stdlib) para μ-law<->lin16 y ratecv para 8k→16k y 16k→8k.
-def mulaw8k_to_pcm16_16k(b64_payload: str) -> bytes:
-    mulaw = base64.b64decode(b64_payload)
-    pcm8k = audioop.ulaw2lin(mulaw, 2)                   # μ-law -> PCM16 @ 8k
-    pcm16k, _ = audioop.ratecv(pcm8k, 2, 1, 8000, 16000, None)  # 8k -> 16k
-    return pcm16k
+# ---------- μ-law <-> PCM16 y resampling (NumPy) ----------
 
-def pcm16_16k_to_mulaw8k(pcm16k: bytes) -> str:
-    pcm8k, _ = audioop.ratecv(pcm16k, 2, 1, 16000, 8000, None)  # 16k -> 8k
-    mulaw = audioop.lin2ulaw(pcm8k, 2)
+# Constantes μ-law
+_MU = 255.0
+_BIAS = 132.0
+
+def _ulaw_to_linear(ulaw_bytes: bytes) -> np.ndarray:
+    """Convierte bytes μ-law -> PCM16 (np.int16), a 8 kHz."""
+    # tabla vectorizada
+    u = np.frombuffer(ulaw_bytes, dtype=np.uint8)
+    u = ~u  # complemento a 1
+    sign = (u & 0x80) != 0
+    exponent = (u >> 4) & 0x07
+    mantissa = u & 0x0F
+    magnitude = ((mantissa.astype(np.int32) << 3) + 0x84) << exponent
+    x = magnitude - 0x84
+    pcm = x.astype(np.int32)
+    pcm[sign] = -pcm[sign]
+    # limitar a 16 bits
+    pcm = np.clip(pcm, -32768, 32767).astype(np.int16)
+    return pcm
+
+def _linear_to_ulaw(pcm16: np.ndarray) -> bytes:
+    """Convierte PCM16 (np.int16) -> μ-law bytes."""
+    x = pcm16.astype(np.int32)
+    sign = (x < 0)
+    x = np.abs(x)
+    x = np.clip(x + 0x84, 0, 0x7FFF)
+
+    # calcular exponente (posición MSB)
+    def _msb_index(v):
+        # índice del bit más significativo (0..15); evitamos bucles
+        idx = np.zeros_like(v)
+        vv = v.copy()
+        for shift in [8, 4, 2, 1]:
+            mask = vv >= (1 << shift)
+            idx[mask] += shift
+            vv[mask] >>= shift
+        return idx
+
+    exp = _msb_index(x >> 7)
+    mant = (x >> (exp + 3)) & 0x0F
+    ulaw = (~((sign.astype(np.uint8) << 7) | (exp << 4) | mant)) & 0xFF
+    return ulaw.tobytes()
+
+def _resample_linear(pcm: np.ndarray, sr_src: int, sr_dst: int) -> np.ndarray:
+    """Re-muestreo por interpolación lineal (mono)."""
+    if sr_src == sr_dst or pcm.size == 0:
+        return pcm
+    ratio = sr_dst / float(sr_src)
+    n_dst = int(round(pcm.size * ratio))
+    # indices de destino en origen
+    x_old = np.arange(pcm.size)
+    x_new = np.linspace(0, pcm.size - 1, num=n_dst)
+    y_new = np.interp(x_new, x_old, pcm.astype(np.float32))
+    # clamp y convertir a int16
+    y_new = np.clip(np.round(y_new), -32768, 32767).astype(np.int16)
+    return y_new
+
+def mulaw8k_to_pcm16_16k(b64_payload: str) -> bytes:
+    """Twilio -> OpenAI: μ-law 8k (base64) -> PCM16 16k (bytes)."""
+    mulaw = base64.b64decode(b64_payload)
+    pcm8k = _ulaw_to_linear(mulaw)                   # int16 @ 8k
+    pcm16k = _resample_linear(pcm8k, 8000, 16000)    # int16 @ 16k
+    return pcm16k.tobytes()
+
+def pcm16_16k_to_mulaw8k(pcm16k_bytes: bytes) -> str:
+    """OpenAI -> Twilio: PCM16 16k (bytes) -> μ-law 8k (base64)."""
+    pcm16k = np.frombuffer(pcm16k_bytes, dtype=np.int16)
+    pcm8k = _resample_linear(pcm16k, 16000, 8000)
+    mulaw = _linear_to_ulaw(pcm8k)
     return base64.b64encode(mulaw).decode("ascii")
 
 # ---------- OpenAI Realtime (WebSocket) ----------
@@ -51,50 +120,16 @@ def _openai_ws_connect(model: str, instructions: str, voice: str):
         "OpenAI-Beta: realtime=v1"
     ]
     ws = websocket.create_connection(url, header=headers, timeout=20)
-    # Enviamos las instrucciones y voz preferida
+    # Enviar sesión inicial
     ws.send(json.dumps({
         "type": "session.update",
         "session": {
             "instructions": instructions or "",
             "voice": voice or "alloy",
-            # Generaremos audio de salida
-            "modalities": ["audio", "text"]
+            "modalities": ["audio", "text"],
         }
     }))
     return ws
-
-# Bombas simples para lectura de salida de OpenAI y envío a Twilio
-def _pump_openai_to_twilio(ws_ai, twilio_send, stream_sid: str, stop_flag):
-    # Recolecta chunks de salida ("output_audio.delta") y los manda a Twilio como μ-law 8k
-    buf = b""
-    try:
-        while not stop_flag["stop"]:
-            raw = ws_ai.recv()
-            if not raw:
-                continue
-            msg = json.loads(raw)
-            t = msg.get("type")
-            if t == "output_audio.delta":
-                chunk_b64 = msg.get("audio", "")
-                if chunk_b64:
-                    pcm16 = base64.b64decode(chunk_b64)
-                    payload = pcm16_16k_to_mulaw8k(pcm16)
-                    # Formato que Twilio espera de vuelta por el WebSocket:
-                    twilio_send(json.dumps({
-                        "event": "media",
-                        "streamSid": stream_sid,
-                        "media": {"payload": payload}
-                    }))
-            elif t in ("response.completed", "response.error"):
-                # Fin de respuesta: nada especial, seguimos.
-                pass
-    except Exception as e:
-        print(f"[BRIDGE] OpenAI->Twilio loop ended: {e}")
-
-def _commit_and_create(ws_ai):
-    # Cierra el buffer de entrada y solicita respuesta
-    ws_ai.send(json.dumps({"type": "input_audio_buffer.commit"}))
-    ws_ai.send(json.dumps({"type": "response.create", "response": {"modalities": ["audio"]}}))
 
 # ---------- TwiML inicial: conecta el Stream ----------
 @bp.route("/call", methods=["POST"])
@@ -106,12 +141,11 @@ def call_entry():
 
     greeting = cfg.get("greeting") or f"Hola, gracias por llamar a {cfg.get('business_name', cfg.get('name',''))}."
     resp = VoiceResponse()
-    # Saludo cortito para evitar silencio inicial (opcional)
+    # Saludo breve para evitar silencio inicial (lo genera Twilio, no TTS)
     resp.say(greeting, voice="Polly.Conchita", language="es-ES")
 
-    # Construye URL WSS para Twilio -> nuestro WS endpoint
+    # URL WSS para Twilio -> nuestro WS endpoint
     ws_url = request.url_root.replace("http", "ws").rstrip("/") + url_for("voice_webrtc.stream_ws")
-    # Pasamos el número destino para elegir el JSON correcto dentro del WS handler
     ws_url += f"?to={to_number}"
 
     with resp.connect() as conn:
@@ -119,7 +153,6 @@ def call_entry():
     return Response(str(resp), mimetype="text/xml")
 
 # ---------- Endpoint WebSocket que recibe el Media Stream de Twilio ----------
-# Requiere: pip install flask-sock websocket-client
 try:
     from flask_sock import Sock
     sock = Sock()
@@ -149,36 +182,37 @@ if sock:
         stream_sid = None
         stop_flag = {"stop": False}
 
-        # Hilo que bombea salida de OpenAI -> Twilio
-        t_out = Thread(target=_pump_openai_to_twilio, args=(ai, ws.send, lambda: stream_sid, stop_flag))
-        # Nota: pasamos stream_sid por lambda para capturar valor actualizado
-        t_out = Thread(target=_pump_openai_to_twilio, args=(ai, ws.send, None, stop_flag))
-        # Pero necesitamos el sid real; ajustamos armando un closure:
-        def send_to_twilio(payload_json):
-            ws.send(payload_json)
-
-        # Reemplazo con cierre que actualiza el sid dentro del loop:
-        def pump():
-            while not stop_flag["stop"]:
-                try:
+        # Bomba: OpenAI -> Twilio
+        def pump_ai_to_twilio():
+            nonlocal stream_sid
+            try:
+                while not stop_flag["stop"]:
                     raw = ai.recv()
-                except Exception as e:
-                    print(f"[BRIDGE] AI recv ended: {e}")
-                    break
-                try:
-                    msg = json.loads(raw)
-                except:
-                    continue
-                if msg.get("type") == "output_audio.delta":
-                    pcm16 = base64.b64decode(msg.get("audio",""))
-                    b64 = pcm16_16k_to_mulaw8k(pcm16)
-                    if stream_sid:
-                        ws.send(json.dumps({"event":"media","streamSid":stream_sid,"media":{"payload": b64}}))
-        t_out = Thread(target=pump, daemon=True)
+                    if not raw:
+                        continue
+                    try:
+                        msg = json.loads(raw)
+                    except Exception:
+                        continue
+                    if msg.get("type") == "output_audio.delta":
+                        pcm16 = base64.b64decode(msg.get("audio", "") or b"")
+                        if pcm16:
+                            b64_ulaw = pcm16_16k_to_mulaw8k(pcm16)
+                            if stream_sid:
+                                ws.send(json.dumps({
+                                    "event": "media",
+                                    "streamSid": stream_sid,
+                                    "media": {"payload": b64_ulaw}
+                                }))
+            except Exception as e:
+                print(f"[BRIDGE] AI->Twilio terminado: {e}")
+
+        t_out = Thread(target=pump_ai_to_twilio, daemon=True)
         t_out.start()
 
+        last_commit = 0.0
+
         try:
-            # ---- Loop principal: eventos desde Twilio ----
             while True:
                 incoming = ws.receive()
                 if incoming is None:
@@ -191,34 +225,26 @@ if sock:
                 et = ev.get("event")
                 if et == "start":
                     stream_sid = (ev.get("start") or {}).get("streamSid")
-                    # Inicia una nueva captura/turno
                     ai.send(json.dumps({"type": "input_audio_buffer.clear"}))
+                    last_commit = 0.0
+
                 elif et == "media":
-                    media = ev.get("media") or {}
-                    payload = media.get("payload")
+                    payload = (ev.get("media") or {}).get("payload")
                     if payload:
                         pcm16 = mulaw8k_to_pcm16_16k(payload)
-                        # Empujar a buffer de entrada de OpenAI
-                        ai.send(json.dumps({"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm16).decode("ascii")}))
-                elif et == "mark":
-                    pass
+                        ai.send(json.dumps({
+                            "type": "input_audio_buffer.append",
+                            "audio": base64.b64encode(pcm16).decode("ascii")
+                        }))
+                    # Heurística sencilla de VAD por tiempo
+                    now = time.time()
+                    if now - last_commit > 1.2:
+                        ai.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                        ai.send(json.dumps({"type": "response.create", "response": {"modalities": ["audio"]}}))
+                        last_commit = now
+
                 elif et == "stop":
                     break
-
-                # Heurística simple: cuando Twilio hace pausa, pedimos respuesta
-                # Twilio no manda VAD explícito; aquí podrías temporizar por chunks o usar marks.
-                # Para demo, si llega un 'media' lo vamos solicitando cada ~350 ms de silencio:
-                # (Podemos hacer algo más sofisticado con timers. Mantener simple por ahora.)
-
-                # (Opción: podrías insertar timers aquí)
-
-                # Para no saturar: cada N ms comprometemos y pedimos respuesta
-                # (muy simple: cada ~1.5s)
-                now = time.time()
-                last = getattr(stream_ws, "_last_commit", 0.0)
-                if now - last > 1.5:
-                    _commit_and_create(ai)
-                    stream_ws._last_commit = now
 
         except Exception as e:
             print(f"[BRIDGE] WS error: {e}")
@@ -233,7 +259,6 @@ if sock:
             except:
                 pass
 else:
-    # Si no está flask_sock instalado, exponemos un health para avisar.
     @bp.route("/stream", methods=["GET"])
     def stream_ws_missing():
-        return Response("❌ Falta dependencia: pip install flask-sock websocket-client", status=500)
+        return Response("❌ Falta dependencia: instala flask-sock y websocket-client", status=500)
