@@ -141,11 +141,10 @@ def call_entry():
     to_number = _canonize_phone(to_number_raw)
 
     bots = current_app.config.get("BOTS_CONFIG") or {}
-    cfg = _get_bot_cfg_by_any_number(bots, to_number) or {}
+    _ = _get_bot_cfg_by_any_number(bots, to_number) or {}
 
-    greeting = cfg.get("greeting") or f"Hola, gracias por llamar a {cfg.get('business_name', cfg.get('name',''))}."
+    # ❌ Sin <Say>: el saludo lo hará OpenAI
     resp = VoiceResponse()
-    resp.say(greeting, voice="Polly.Conchita", language="es-ES")
 
     ws_base = request.url_root.replace("http", "ws").rstrip("/") + "/voice-webrtc/stream"
     qs = urlencode({"to": to_number})
@@ -172,6 +171,7 @@ if sock:
         model = (cfg.get("realtime") or {}).get("model") or os.getenv("REALTIME_MODEL", "gpt-4o-realtime-preview-2024-12-17")
         voice = (cfg.get("realtime") or {}).get("voice") or os.getenv("REALTIME_VOICE", "alloy")
         instructions = (cfg.get("system_prompt") or cfg.get("prompt") or "")
+        greet_text = cfg.get("greeting") or "Hola, gracias por llamar. ¿En qué puedo ayudarte?"
 
         # ---- OpenAI WS ----
         ai = _openai_ws_connect(model, instructions, voice, debug=True)
@@ -235,18 +235,12 @@ if sock:
         t_out = Thread(target=pump_ai_to_twilio, daemon=True)
         t_out.start()
 
-        # Umbrales (subimos a 200ms para ser conservadores)
+        # Umbrales (≥100ms requerido por Realtime; usamos 200ms para ir seguros)
         MIN_COMMIT_GAP_SEC = 1.2      # no spamear
         MIN_SILENCE_GAP_SEC = 0.6     # silencio desde el último frame
         MIN_COMMIT_SAMPLES = 3200     # 200ms * 16k
 
         try:
-            # Bienvenida válida
-            ai.send(json.dumps({
-                "type": "response.create",
-                "response": { "modalities": ["audio", "text"] }
-            }))
-
             frames = 0
             while True:
                 incoming = ws.receive()
@@ -267,6 +261,15 @@ if sock:
                     appended_samples_since_last_commit["n"] = 0
                     ai.send(json.dumps({"type": "input_audio_buffer.clear"}))
                     print(f"[CALL] start streamSid={stream_sid} to={to_number} loopback=False")
+
+                    # ✅ Saludo inicial dicho por OpenAI (misma voz de la sesión)
+                    ai.send(json.dumps({
+                        "type": "response.create",
+                        "response": {
+                            "modalities": ["audio", "text"],
+                            "instructions": greet_text
+                        }
+                    }))
 
                 elif et == "media":
                     payload = (ev.get("media") or {}).get("payload")
@@ -294,10 +297,6 @@ if sock:
                         last_append_time = now
 
                     # Heurística de commit:
-                    #  - Hay algo en buffer desde el último commit
-                    #  - Ya hay ≥MIN_COMMIT_SAMPLES
-                    #  - Han pasado ≥MIN_SILENCE_GAP_SEC sin recibir audio nuevo (silencio)
-                    #  - Y respetamos MIN_COMMIT_GAP_SEC entre commits
                     if have_appended_since_last_commit["v"]:
                         enough_audio = appended_samples_since_last_commit["n"] >= MIN_COMMIT_SAMPLES
                         long_enough_since_last_commit = (now - last_commit_time) >= MIN_COMMIT_GAP_SEC
