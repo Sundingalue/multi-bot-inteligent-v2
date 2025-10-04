@@ -36,7 +36,7 @@ from firebase_admin import credentials, db
 # 🔹 NEW: FCM (para notificaciones push)
 from firebase_admin import messaging as fcm
 
-# ✅ Crear la app ANTES de registrar los blueprints
+# ✅ Crear la app ANTES de registrar los blueprints (y solo una vez)
 app = Flask(__name__)
 
 # 🔹 Avatar Realtime (sesión efímera para “Hablar ahora”)
@@ -44,27 +44,9 @@ from avatar_realtime import bp as realtime_bp
 from avatar_profiles import bp as profiles_bp
 from voice_realtime import bp as voice_rt_bp
 
-from voice_webrtc_bridge import bp as webrtc_bridge_bp
-app.register_blueprint(webrtc_bridge_bp)
-
-# ✅ Registrar los blueprints
-app.register_blueprint(realtime_bp)
-app.register_blueprint(profiles_bp)
-app.register_blueprint(voice_rt_bp)
-
-
-
-# Se eliminan las dependencias de WebSocket porque no funcionaban
-# import base64
-# import struct
-# import ssl
-# from threading import Event
-# import urllib.parse
-# try:
-#     from flask_sock import Sock
-#     import websocket
-# except Exception as _e:
-#     pass
+# 🔹 Bridge WebRTC ↔ OpenAI Realtime (Twilio Media Streams)
+#    Importamos también el `sock` y lo inicializamos más abajo.
+from voice_webrtc_bridge import bp as webrtc_bridge_bp, sock as webrtc_sock
 
 # =======================
 #  Cargar variables de entorno (Render -> Secret File)
