@@ -1,11 +1,12 @@
 # voice_webrtc_bridge.py
 # Bridge Twilio <Stream> (PCMU 8k) ↔ OpenAI Realtime WS (PCM16 16k)
 # Sin 'audioop' (eliminado en Python 3.13). Usamos NumPy.
+# + El saludo inicial lo habla OpenAI (no Twilio).
 # + Emite “meter” del audio del BOT vía Twilio mark (no rompe el schema).
 # + Fixes: formatos Realtime, modalidades, y commit con >100ms de audio.
-# + Extra: VAD simple por silencio y logs de commit.
+# + Extra: VAD simple por silencio, logs de commit y keepalive al WS Realtime.
 
-import os, json, base64, time
+import os, json, base64, time, threading
 from flask import Blueprint, request, Response, current_app
 from twilio.twiml.voice_response import VoiceResponse
 import websocket  # websocket-client
@@ -111,28 +112,53 @@ def _pcm16_bytes_rms_norm_0_1(pcm16_bytes: bytes) -> float:
 
 # ---------- OpenAI Realtime (WebSocket) ----------
 def _openai_ws_connect(model: str, instructions: str, voice: str, debug=False):
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY no está configurada")
+
     url = f"wss://api.openai.com/v1/realtime?model={model}"
     headers = [
-        f"Authorization: Bearer {os.getenv('OPENAI_API_KEY','')}",
+        f"Authorization: Bearer {api_key}",
         "OpenAI-Beta: realtime=v1"
     ]
-    ws = websocket.create_connection(url, header=headers, timeout=20)
+    # Conexión con timeout y keepalive
+    ws_ai = websocket.create_connection(url, header=headers, timeout=20)
+    ws_ai.settimeout(5.0)  # evita bloqueos eternos en recv
     if debug:
         print(f"[AI ] WS connected model={model} voice={voice}")
-    # Formatos como string y modalidades válidas
-    ws.send(json.dumps({
-        "type": "session.update",
-        "session": {
-            "instructions": instructions or "",
-            "voice": voice or "alloy",
-            "modalities": ["audio", "text"],
-            "input_audio_format":  "pcm16",
-            "output_audio_format": "pcm16"
-        }
-    }))
-    if debug:
-        print("[AI ] session.update sent")
-    return ws
+
+    # Configuración de sesión
+    try:
+        ws_ai.send(json.dumps({
+            "type": "session.update",
+            "session": {
+                "instructions": instructions or "",
+                "voice": voice or "alloy",
+                "modalities": ["audio", "text"],
+                "input_audio_format":  "pcm16",
+                "output_audio_format": "pcm16"
+            }
+        }))
+        if debug:
+            print("[AI ] session.update sent")
+    except Exception as e:
+        print(f"[AI ] session.update error: {e}")
+        raise
+
+    # Keepalive cada 15s (evita timeouts en rutas lentas)
+    def _ai_keepalive():
+        try:
+            while True:
+                time.sleep(15)
+                try:
+                    ws_ai.ping()
+                except Exception:
+                    break
+        except Exception:
+            pass
+
+    threading.Thread(target=_ai_keepalive, daemon=True).start()
+    return ws_ai
 
 # ---------- TwiML inicial ----------
 @bp.route("/call", methods=["POST"])
@@ -183,13 +209,18 @@ if sock:
         appended_samples_since_last_commit = {"n": 0}
         last_commit_time = 0.0
         last_append_time = 0.0
+        greeting_sent = False
 
         # ---- AI -> Twilio ----
         def pump_ai_to_twilio():
             nonlocal stream_sid
             try:
                 while not stop_flag["stop"]:
-                    raw = ai.recv()
+                    try:
+                        raw = ai.recv()
+                    except Exception as e:
+                        # Timeout o cierre: seguimos intentando hasta que pare la llamada
+                        continue
                     if not raw:
                         continue
                     try:
@@ -203,7 +234,7 @@ if sock:
                         if not pcm16:
                             continue
 
-                        # Meter como mark
+                        # Meter “meter” como mark para UI/depuración (opcional)
                         if stream_sid:
                             level = int(_pcm16_bytes_rms_norm_0_1(pcm16) * 100)
                             try:
@@ -224,10 +255,11 @@ if sock:
                                 "media": {"payload": b64_ulaw}
                             }))
 
-                    elif t in ("response.created", "response.completed", "session.updated"):
-                        pass
                     elif t == "error":
                         print(f"[AI ] ERROR: {msg}")
+                    elif t in ("response.created", "response.completed", "session.updated"):
+                        # Logs silenciosos
+                        pass
 
             except Exception as e:
                 print(f"[BRIDGE] AI->Twilio terminado: {e}")
@@ -263,13 +295,15 @@ if sock:
                     print(f"[CALL] start streamSid={stream_sid} to={to_number} loopback=False")
 
                     # ✅ Saludo inicial dicho por OpenAI (misma voz de la sesión)
-                    ai.send(json.dumps({
-                        "type": "response.create",
-                        "response": {
-                            "modalities": ["audio", "text"],
-                            "instructions": greet_text
-                        }
-                    }))
+                    if not greeting_sent:
+                        ai.send(json.dumps({
+                            "type": "response.create",
+                            "response": {
+                                "modalities": ["audio", "text"],
+                                "instructions": greet_text
+                            }
+                        }))
+                        greeting_sent = True
 
                 elif et == "media":
                     payload = (ev.get("media") or {}).get("payload")
