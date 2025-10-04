@@ -1,27 +1,21 @@
 # voice_webrtc_bridge.py
 # Bridge Twilio <Stream> (PCMU 8k) ↔ OpenAI Realtime WS (PCM16 16k)
-# Sin 'audioop' (eliminado en Python 3.13). Usamos NumPy.
-# - El saludo inicial lo habla OpenAI (no Twilio).
-# - “meter” del audio BOT vía Twilio mark (no rompe el schema).
-# - Formatos Realtime correctos (pcm16 in/out), commit solo con >100ms audio real.
-# - VAD por silencio (simple), logs útiles y keepalive al WS Realtime.
-# - BLOQUEOS CLAVE: sin commits por tiempo y una sola respuesta activa (ai_busy).
+# Sin audioop. Con NumPy. Arreglos:
+# - No commit si el buffer aún no tiene audio (evita input_audio_buffer_commit_empty)
+# - session.update con sample_rate_hz=16000
+# - Control de respuesta activa (evita conversation_already_has_active_response)
 
 import os, json, base64, time, threading
 from flask import Blueprint, request, Response, current_app
 from twilio.twiml.voice_response import VoiceResponse
 import websocket  # websocket-client
 from threading import Thread
-from urllib.parse import urlencode  # para URL-encode del '+'
+from urllib.parse import urlencode
 
 try:
     import numpy as np
 except Exception as e:
-    raise RuntimeError(
-        "Falta NumPy para el bridge de audio. Agrega 'numpy' a requirements.txt"
-    ) from e
-
-BRIDGE_VERSION = "webrtc-bridge/1.0.3-no-time-commit"
+    raise RuntimeError("Falta NumPy. Agrega 'numpy' a requirements.txt") from e
 
 bp = Blueprint("voice_webrtc", __name__, url_prefix="/voice-webrtc")
 
@@ -66,7 +60,6 @@ def _linear_to_ulaw(pcm16: np.ndarray) -> bytes:
     sign = (x < 0)
     x = np.abs(x)
     x = np.clip(x + 0x84, 0, 0x7FFF)
-
     def _msb_index(v):
         idx = np.zeros_like(v)
         vv = v.copy()
@@ -75,7 +68,6 @@ def _linear_to_ulaw(pcm16: np.ndarray) -> bytes:
             idx[mask] += shift
             vv[mask] >>= shift
         return idx
-
     exp = _msb_index(x >> 7)
     mant = (x >> (exp + 3)) & 0x0F
     ulaw = (~((sign.astype(np.uint8) << 7) | (exp << 4) | mant)) & 0xFF
@@ -94,8 +86,8 @@ def _resample_linear(pcm: np.ndarray, sr_src: int, sr_dst: int) -> np.ndarray:
 
 def mulaw8k_to_pcm16_16k(b64_payload: str) -> bytes:
     mulaw = base64.b64decode(b64_payload)
-    pcm8k = _ulaw_to_linear(mulaw)                   # int16 @ 8k
-    pcm16k = _resample_linear(pcm8k, 8000, 16000)    # int16 @ 16k
+    pcm8k = _ulaw_to_linear(mulaw)
+    pcm16k = _resample_linear(pcm8k, 8000, 16000)
     return pcm16k.tobytes()
 
 def pcm16_16k_to_mulaw8k(pcm16k_bytes: bytes) -> str:
@@ -128,9 +120,9 @@ def _openai_ws_connect(model: str, instructions: str, voice: str, debug=False):
     ]
     ws_ai = websocket.create_connection(url, header=headers, timeout=20)
     if debug:
-        print(f"[AI ] WS connected model={model} voice={voice}  [{BRIDGE_VERSION}]")
+        print(f"[AI ] WS connected model={model} voice={voice}")
 
-    # Configuración inicial de sesión (se puede actualizar luego)
+    # Configuración inicial de sesión
     ws_ai.send(json.dumps({
         "type": "session.update",
         "session": {
@@ -138,13 +130,14 @@ def _openai_ws_connect(model: str, instructions: str, voice: str, debug=False):
             "voice": voice or "alloy",
             "modalities": ["audio", "text"],
             "input_audio_format":  "pcm16",
-            "output_audio_format": "pcm16"
+            "output_audio_format": "pcm16",
+            "sample_rate_hz": 16000   # ⬅️ EXPLÍCITO
         }
     }))
     if debug:
         print("[AI ] session.update sent")
 
-    # Keepalive cada 15s (evita timeouts en rutas lentas)
+    # Keepalive
     def _ai_keepalive():
         try:
             while True:
@@ -167,11 +160,9 @@ def call_entry():
 
     # Sin <Say>: el saludo lo hará OpenAI
     resp = VoiceResponse()
-
     ws_base = request.url_root.replace("http", "ws").rstrip("/") + "/voice-webrtc/stream"
     qs = urlencode({"to": to_number})
     ws_url = f"{ws_base}?{qs}"
-
     with resp.connect() as conn:
         conn.stream(url=ws_url)
     return Response(str(resp), mimetype="text/xml")
@@ -186,7 +177,7 @@ except Exception:
 if sock:
     @sock.route("/voice-webrtc/stream")
     def stream_ws(ws):
-        # ---- Config base (puede ajustarse al recibir 'start') ----
+        # ---- Config base ----
         to_number_qs = request.args.get("to", "")
         bots = current_app.config.get("BOTS_CONFIG") or {}
         cfg = _get_bot_cfg_by_any_number(bots, to_number_qs) or {}
@@ -195,27 +186,24 @@ if sock:
         instructions = (cfg.get("system_prompt") or cfg.get("prompt") or "")
         greet_text = cfg.get("greeting") or "Hola, gracias por llamar. ¿En qué puedo ayudarte?"
 
-        print(f"[BOOT] {BRIDGE_VERSION} up — model={model} voice={voice}")
-
-        # ---- OpenAI WS ----
         ai = _openai_ws_connect(model, instructions, voice, debug=True)
 
         stream_sid = None
         stop_flag = {"stop": False}
 
+        # Estado de buffer/commit
         have_appended_since_last_commit = {"v": False}
         appended_samples_since_last_commit = {"n": 0}
-        last_commit_time = 0.0
+        last_commit_time = time.time()  # ⬅️ inicia “reciente” para NO cometer en frío
         last_append_time = 0.0
         greeting_sent = False
 
-        # Gate para UNA respuesta a la vez
-        ai_busy = {"v": False}
+        # Control de respuesta activa
+        active_response = {"on": False}
 
         # ---- AI -> Twilio ----
-        out_frames = 0
         def pump_ai_to_twilio():
-            nonlocal stream_sid, out_frames
+            nonlocal stream_sid
             try:
                 while not stop_flag["stop"]:
                     raw = ai.recv()
@@ -232,9 +220,8 @@ if sock:
                         pcm16 = base64.b64decode(msg.get("audio", "") or b"")
                         if not pcm16:
                             continue
-
-                        # Meter “meter” como mark (opcional)
                         if stream_sid:
+                            # VU meter (opcional)
                             level = int(_pcm16_bytes_rms_norm_0_1(pcm16) * 100)
                             try:
                                 ws.send(json.dumps({
@@ -244,38 +231,35 @@ if sock:
                                 }))
                             except Exception:
                                 pass
-
-                        # A Twilio (μ-law 8k)
-                        b64_ulaw = pcm16_16k_to_mulaw8k(pcm16)
-                        if stream_sid:
+                            # A Twilio (μ-law 8k)
+                            b64_ulaw = pcm16_16k_to_mulaw8k(pcm16)
                             ws.send(json.dumps({
                                 "event": "media",
                                 "streamSid": stream_sid,
                                 "media": {"payload": b64_ulaw}
                             }))
-                            out_frames += 1
-                            if out_frames in (1, 50, 200) or out_frames % 200 == 0:
-                                print(f"[OUT] frames={out_frames}")
 
-                    elif t in ("response.completed", "response.stopped"):
-                        ai_busy["v"] = False
-                        # print("[AI ] response completed")
+                    elif t == "response.created":
+                        active_response["on"] = True
+
+                    elif t == "response.completed":
+                        active_response["on"] = False
 
                     elif t == "error":
-                        # No cambiamos ai_busy aquí; el modelo gestiona su estado
                         print(f"[AI ] ERROR: {msg}")
+                        # si hay error, liberamos el flag para no bloquear siguientes respuestas
+                        active_response["on"] = False
 
-                    # silenciar logs de 'response.created', 'session.updated' para no saturar
             except Exception as e:
                 print(f"[BRIDGE] AI->Twilio terminado: {e}")
 
-        t_out = Thread(target=pump_ai_to_twilio, daemon=True)
-        t_out.start()
+        Thread(target=pump_ai_to_twilio, daemon=True).start()
 
-        # Umbrales (Realtime exige ≥100ms; usamos 200ms para ir seguros)
-        MIN_COMMIT_GAP_SEC = 1.2      # evita spam
-        MIN_SILENCE_GAP_SEC = 0.6     # silencio desde último frame
-        MIN_COMMIT_SAMPLES = 3200     # 200ms * 16k
+        # Umbrales
+        MIN_COMMIT_GAP_SEC = 1.0
+        MIN_SILENCE_GAP_SEC = 0.4
+        MIN_COMMIT_SAMPLES = 1600       # 100ms * 16k  ⬅️ requisito mínimo real
+        HARD_COMMIT_EVERY_SEC = 2.5
 
         try:
             frames = 0
@@ -289,71 +273,38 @@ if sock:
                     continue
 
                 et = ev.get("event")
+
                 if et == "start":
                     start_obj = ev.get("start") or {}
                     stream_sid = start_obj.get("streamSid")
-
-                    # (customParameters desde Twilio <Stream>) — opcional
-                    custom = (start_obj.get("customParameters") or {})
-                    to_p = custom.get("to_number") or to_number_qs or ""
-                    bot_hint = (custom.get("bot_hint") or "").strip().lower()
-
-                    # Intentamos refrescar config de bot por nombre/numero
-                    cfg2 = None
-                    if bot_hint:
-                        for c in (bots or {}).values():
-                            if isinstance(c, dict) and c.get("name", "").strip().lower() == bot_hint:
-                                cfg2 = c
-                                break
-                    if not cfg2:
-                        cfg2 = _get_bot_cfg_by_any_number(bots, to_p) or cfg
-
-                    # Si hay cambios relevantes, actualizar la sesión:
-                    new_instructions = (cfg2.get("system_prompt") or cfg2.get("prompt") or "") if isinstance(cfg2, dict) else instructions
-                    new_voice = (cfg2.get("realtime") or {}).get("voice") if isinstance(cfg2, dict) else None
-                    if new_instructions != instructions or (new_voice and new_voice != voice):
-                        try:
-                            ai.send(json.dumps({
-                                "type": "session.update",
-                                "session": {
-                                    "instructions": new_instructions or "",
-                                    "voice": (new_voice or voice or "alloy"),
-                                }
-                            }))
-                            instructions = new_instructions or instructions
-                            voice = new_voice or voice
-                            print("[AI ] session.update (customParameters) applied")
-                        except Exception as e:
-                            print(f"[AI ] session.update error: {e}")
-
-                    # Reset de contadores
+                    # reset estado
                     frames = 0
-                    last_commit_time = 0.0
+                    last_commit_time = time.time()
                     last_append_time = 0.0
                     have_appended_since_last_commit["v"] = False
                     appended_samples_since_last_commit["n"] = 0
-                    ai_busy["v"] = False
+                    active_response["on"] = False
                     try:
                         ai.send(json.dumps({"type": "input_audio_buffer.clear"}))
                     except Exception:
                         pass
-                    print(f"[CALL] start streamSid={stream_sid} to={to_p} [{BRIDGE_VERSION}]")
+                    print(f"[CALL] start streamSid={stream_sid}")
 
-                    # Saludo inicial por OpenAI (una sola vez)
-                    if not greeting_sent:
+                    # Saludo inicial (solo si no hay respuesta activa)
+                    if not greeting_sent and not active_response["on"]:
                         try:
-                            greet_text2 = (cfg2.get("greeting") or greet_text) if isinstance(cfg2, dict) else greet_text
                             ai.send(json.dumps({
                                 "type": "response.create",
                                 "response": {
                                     "modalities": ["audio", "text"],
-                                    "instructions": greet_text2
+                                    "instructions": greet_text
                                 }
                             }))
-                            ai_busy["v"] = True
                             greeting_sent = True
+                            active_response["on"] = True
                         except Exception as e:
                             print(f"[AI ] greet error: {e}")
+                            active_response["on"] = False
 
                 elif et == "media":
                     payload = (ev.get("media") or {}).get("payload")
@@ -362,14 +313,6 @@ if sock:
                     if payload:
                         frames += 1
                         pcm16 = mulaw8k_to_pcm16_16k(payload)
-
-                        # DEBUG de entrada
-                        try:
-                            lvl = _pcm16_bytes_rms_norm_0_1(pcm16)
-                            if frames <= 5 or lvl > 0.02 or frames % 50 == 0:
-                                print(f"[IN ] frames={frames} RMS={lvl:.3f}")
-                        except:
-                            pass
 
                         # Append al buffer Realtime
                         try:
@@ -383,25 +326,25 @@ if sock:
                         except Exception as e:
                             print(f"[AI ] append error: {e}")
 
-                    # Heurística de commit (SIN fallback por tiempo)
-                    if have_appended_since_last_commit["v"] and not ai_busy["v"]:
+                    # Heurística de commit: NUNCA si no hubo append
+                    if have_appended_since_last_commit["v"]:
                         enough_audio = appended_samples_since_last_commit["n"] >= MIN_COMMIT_SAMPLES
                         long_enough_since_last_commit = (now - last_commit_time) >= MIN_COMMIT_GAP_SEC
-                        silence_since_last_append = (now - last_append_time) >= MIN_SILENCE_GAP_SEC
+                        silence_since_last_append = (now - last_append_time) >= MIN_SILENCE_GAP_SEC if last_append_time > 0 else False
+                        time_fallback = (now - last_commit_time) >= HARD_COMMIT_EVERY_SEC
 
-                        if enough_audio and long_enough_since_last_commit and silence_since_last_append:
-                            print(f"[COMMIT] samples={appended_samples_since_last_commit['n']} "
-                                  f"since_last_append={now - last_append_time:.3f}s "
-                                  f"gap={now - last_commit_time:.3f}s")
+                        if enough_audio and long_enough_since_last_commit and (silence_since_last_append or time_fallback):
                             try:
                                 ai.send(json.dumps({"type": "input_audio_buffer.commit"}))
-                                ai.send(json.dumps({
-                                    "type": "response.create",
-                                    "response": { "modalities": ["audio", "text"] }
-                                }))
-                                ai_busy["v"] = True
+                                # No crear otra respuesta si hay una activa
+                                if not active_response["on"]:
+                                    ai.send(json.dumps({
+                                        "type": "response.create",
+                                        "response": { "modalities": ["audio", "text"] }
+                                    }))
+                                    active_response["on"] = True
                             except Exception as e:
-                                print(f"[AI ] commit error: {e}")
+                                print(f"[AI ] commit/response error: {e}")
 
                             last_commit_time = now
                             have_appended_since_last_commit["v"] = False
