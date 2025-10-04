@@ -48,6 +48,15 @@ from voice_realtime import bp as voice_rt_bp
 #    Importamos también el `sock` y lo inicializamos más abajo.
 from voice_webrtc_bridge import bp as webrtc_bridge_bp, sock as webrtc_sock
 
+# ⬇️ Montar blueprints y arrancar Flask-Sock
+app.register_blueprint(realtime_bp)
+app.register_blueprint(profiles_bp)
+app.register_blueprint(voice_rt_bp)
+
+app.register_blueprint(webrtc_bridge_bp)  # Rutas /voice-webrtc/*
+webrtc_sock.init_app(app)                  # Inicializa WebSocket /voice-webrtc/stream
+
+
 # =======================
 #  Cargar variables de entorno (Render -> Secret File)
 # =======================
@@ -76,12 +85,6 @@ if APP_DOWNLOAD_URL_FALLBACK and not _valid_url(APP_DOWNLOAD_URL_FALLBACK):
     print(f"⚠️ APP_DOWNLOAD_URL_FALLBACK inválido: '{APP_DOWNLOAD_URL_FALLBACK}'")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
-app = Flask(__name__)
-# Registro del Blueprint para Avatar Realtime
-app.register_blueprint(realtime_bp)
-app.register_blueprint(profiles_bp)
-app.register_blueprint(voice_rt_bp)  # ✅ (AÑADIDO) re-montar /voice-realtime/* tras la segunda creación de app
-# --- Exponer recursos al Blueprint de Instagram ---
 app.secret_key = "supersecreto_sundin_panel_2025"
 
 # === JSON de Tarjeta Inteligente (sirve archivos desde bots/tarjeta_inteligente) ===
