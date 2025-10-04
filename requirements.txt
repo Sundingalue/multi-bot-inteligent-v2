@@ -12,6 +12,7 @@ websocket-client==1.8.0
 simple-websocket
 requests==2.32.3
 pytz
+numpy
 
 
 # SDK de OpenAI
