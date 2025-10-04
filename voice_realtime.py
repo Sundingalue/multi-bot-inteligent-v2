@@ -1,41 +1,71 @@
 # voice_realtime.py
 import os
+import glob
+import json
 import httpx
-import requests
-from flask import Blueprint, request, Response, send_from_directory, jsonify, make_response
+from flask import Blueprint, request, Response, send_from_directory
 from twilio.twiml.voice_response import VoiceResponse, Gather
-from utils.bot_loader import load_bot
 
 bp = Blueprint("voice_realtime", __name__, url_prefix="/voice-realtime")
 
-# Carpeta temporal para audios (PSTN actual)
+# Carpeta temporal para audios
 TMP_DIR = "/tmp"
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+# ──────────────────────────────────────────────
+# Helpers: resolver bot por número EXCLUSIVAMENTE desde bots/*.json
+# ──────────────────────────────────────────────
 
-# =========================
-# Helpers comunes
-# =========================
-def _corsify(resp):
-    origin = request.headers.get("Origin", "")
-    if origin:
-        resp.headers["Access-Control-Allow-Origin"] = origin
-        resp.headers["Vary"] = "Origin"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        resp.headers["Access-Control-Max-Age"] = "86400"
-    return resp
+def _canonize_phone(raw: str) -> str:
+    s = str(raw or "").strip()
+    for p in ("whatsapp:", "tel:", "sip:", "client:"):
+        if s.startswith(p):
+            s = s[len(p):]
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if not digits:
+        return ""
+    if len(digits) == 11 and digits.startswith("1"):
+        return "+" + digits
+    if len(digits) == 10:
+        digits = "1" + digits
+    return "+" + digits
 
-def _system_instructions_from_bot(bot_cfg: dict) -> str:
+def _load_bot_cfg_by_number_only_bots_folder(to_number: str):
     """
-    Soporta tus formatos de JSON:
-    - { instructions: { system_prompt: "..." } }
-    - { system_prompt: "..." }
-    - { prompt: "..." }
+    Busca en bots/*.json una entrada que corresponda al número.
+    NUNCA lee tarjeta_inteligente.
     """
+    canon_to = _canonize_phone(to_number)  # ej: +18326213202
+    try:
+        for path in glob.glob(os.path.join("bots", "*.json")):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                continue
+
+            # 1) Claves de primer nivel (p.ej. "whatsapp:+18326213202")
+            for key, cfg in data.items():
+                if not isinstance(cfg, dict):
+                    continue
+                if _canonize_phone(key) == canon_to:
+                    return cfg
+
+            # 2) channels.whatsapp.number o whatsapp_number dentro del objeto
+            for _, cfg in data.items():
+                if not isinstance(cfg, dict):
+                    continue
+                ch = cfg.get("channels") or {}
+                wa = ch.get("whatsapp") or {}
+                num = wa.get("number") or cfg.get("whatsapp_number") or ""
+                if _canonize_phone(num) == canon_to:
+                    return cfg
+    except Exception:
+        pass
+    return None
+
+def _effective_system_prompt(bot_cfg: dict) -> str:
     if not isinstance(bot_cfg, dict):
         return ""
-    ins = (bot_cfg.get("instructions") or {})
+    ins = bot_cfg.get("instructions") or {}
     if isinstance(ins, dict) and ins.get("system_prompt"):
         return str(ins["system_prompt"])
     if bot_cfg.get("system_prompt"):
@@ -44,156 +74,54 @@ def _system_instructions_from_bot(bot_cfg: dict) -> str:
         return str(bot_cfg["prompt"])
     return ""
 
-def _synthesize_tts_wav(text: str, voice: str = "cedar", speed: float = 0.95) -> bytes:
-    """
-    Genera audio con OpenAI TTS en formato WAV 8 kHz (ideal para PSTN).
-    Usado por el flujo PSTN/Gather existente (no se elimina).
-    """
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY no configurada")
-    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
-    payload = {
-        "model": "gpt-4o-mini-tts",
-        "voice": voice or "cedar",
-        "input": text or "",
-        "format": "wav",
-        "sample_rate": 8000,
-        "speed": speed
-    }
-    with httpx.Client(timeout=60.0) as client:
-        r = client.post(
-            "https://api.openai.com/v1/audio/speech",
-            headers=headers,
-            json=payload
-        )
-        r.raise_for_status()
-        return r.content
+def _effective_greeting(bot_cfg: dict) -> str:
+    if not isinstance(bot_cfg, dict):
+        return "Hola, gracias por llamar. ¿En qué puedo ayudarle hoy?"
+    return (
+        bot_cfg.get("voice_greeting")
+        or bot_cfg.get("greeting")
+        or f"Hola, gracias por llamar a {bot_cfg.get('business_name', bot_cfg.get('name','nuestra empresa'))}. ¿En qué puedo ayudarle hoy?"
+    )
 
-# =========================
-# 🔴 NUEVO: WebRTC Realtime
-# =========================
-@bp.get("/webrtc/health")
-def webrtc_health():
-    # Defaults si no hay bot
-    model = os.getenv("REALTIME_MODEL", "gpt-4o-realtime-preview-2024-12-17")
-    voice = os.getenv("REALTIME_VOICE", "cedar")
-    resp = jsonify({"ok": True, "service": "webrtc", "model": model, "voice": voice})
-    return _corsify(resp)
+def _effective_voice(bot_cfg: dict) -> str:
+    # Prioriza realtime.voice (p. ej. "cedar")
+    if not isinstance(bot_cfg, dict):
+        return "alloy"
+    rt = bot_cfg.get("realtime") or {}
+    return (rt.get("voice") or bot_cfg.get("voice") or "alloy")
 
-@bp.route("/webrtc/session", methods=["POST", "OPTIONS"])
-def webrtc_session():
-    """
-    Crea una sesión efímera Realtime (WebRTC) en OpenAI y devuelve el client_secret.
-    Front (tarjeta inteligente / web) usa este endpoint para iniciar la llamada WebRTC directa a OpenAI.
-    
-    Uso:
-      POST /voice-realtime/webrtc/session?bot=whatsapp:+18326213202
-      POST /voice-realtime/webrtc/session?bot=ninafit
-    """
-    if request.method == "OPTIONS":
-        return _corsify(make_response(("", 204)))
-
-    if not OPENAI_API_KEY:
-        return _corsify(jsonify({"ok": False, "error": "OPENAI_API_KEY no configurada"})), 500
-
-    bot_id = request.args.get("bot") or request.headers.get("X-Bot-Id") or ""
-    bot_cfg = {}
-    if bot_id:
-        try:
-            bot_cfg = load_bot(bot_id)
-        except Exception:
-            # Si falla, no rompemos: bot vacío y seguimos con defaults
-            bot_cfg = {}
-
-    # Instrucciones, modelo, voz y modalidades
-    instructions = _system_instructions_from_bot(bot_cfg)
-    model_from_json = (bot_cfg.get("realtime") or {}).get("model")
-    voice_from_json = (bot_cfg.get("realtime") or {}).get("voice")
-
-    model_to_use = model_from_json or os.getenv("REALTIME_MODEL", "gpt-4o-realtime-preview-2024-12-17")
-    voice_to_use = voice_from_json or os.getenv("REALTIME_VOICE", "cedar")
-    modalities_to_use = (bot_cfg.get("realtime") or {}).get("modalities", ["audio", "text"]) or ["audio", "text"]
-
-    # Construcción de payload Realtime
-    payload = {
-        "model": model_to_use,
-        "voice": voice_to_use,
-        "modalities": modalities_to_use,
-        "instructions": instructions
-        # Si quieres forzar VAD server-side, puedes añadir aquí:
-        # , "turn_detection": {"type": "server_vad", "silence_duration_ms": 1200}
-    }
-
-    try:
-        r = requests.post(
-            "https://api.openai.com/v1/realtime/sessions",
-            headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json",
-                "OpenAI-Beta": "realtime=v1",
-            },
-            json=payload,
-            timeout=25,
-        )
-        if r.status_code >= 400:
-            resp = jsonify({
-                "ok": False,
-                "error": "OpenAI Realtime error",
-                "status": r.status_code,
-                "detail": r.text,
-                "payload": payload
-            })
-            return _corsify(resp), 502
-
-        data = r.json()
-        # data contiene { client_secret: {value, expires_at}, ... }
-        resp = jsonify({
-            "ok": True,
-            "session": data,
-            "bot_id": bot_id or None,
-            "applied": {
-                "model": model_to_use,
-                "voice": voice_to_use,
-                "modalities": modalities_to_use
-            }
-        })
-        return _corsify(resp)
-    except requests.Timeout:
-        return _corsify(jsonify({"ok": False, "error": "Timeout creando sesión"})), 504
-    except Exception as e:
-        return _corsify(jsonify({"ok": False, "error": "Excepción creando sesión", "detail": str(e)})), 500
-
-# ======================================================
-# 🔵 EXISTENTE: PSTN (Twilio Voice con Gather) - INTACTO
-# ======================================================
+def _effective_model_text(bot_cfg: dict) -> str:
+    # Modelo para chat/completions (texto)
+    if not isinstance(bot_cfg, dict):
+        return "gpt-4o"
+    return (bot_cfg.get("model") or "gpt-4o")
 
 # ──────────────────────────────────────────────
-# Llamada entrante (PSTN)
+# Llamada entrante
 # ──────────────────────────────────────────────
 @bp.route("/call", methods=["POST"])
 def handle_incoming_call():
     to_number = request.values.get("To")
-    bot_cfg = load_bot(f"whatsapp:{to_number}")
+    bot_cfg = _load_bot_cfg_by_number_only_bots_folder(to_number)
 
-    greeting = bot_cfg.get("greeting", "Hola, gracias por llamar.")
-    _voice = (bot_cfg.get("realtime", {}) or {}).get("voice", "cedar")
+    # Si no hay config, devolvemos un fallback amable
+    if not bot_cfg:
+        resp = VoiceResponse()
+        resp.say("Lo siento, no hay un bot configurado para este número de voz.")
+        return Response(str(resp), mimetype="text/xml")
 
+    greeting = _effective_greeting(bot_cfg)
     resp = VoiceResponse()
-    try:
-        audio_bytes = _synthesize_tts_wav(greeting, voice=_voice, speed=0.95)
-        filename = f"greeting_{os.getpid()}.wav"
-        audio_path = os.path.join(TMP_DIR, filename)
-        with open(audio_path, "wb") as f:
-            f.write(audio_bytes)
-        resp.play(f"{request.url_root}voice-realtime/media/{filename}")
-    except Exception:
-        resp.say(greeting, voice="Polly.Salli", language="es-ES")
 
+    # Saludo inicial (TTS de Twilio solo para esta línea)
+    resp.say(greeting, voice="Polly.Salli", language="es-ES")
+
+    # Espera respuesta del usuario
     gather = Gather(
         input="speech",
         action=f"{request.url_root}voice-realtime/response",
         method="POST",
-        language="es-US",   # mejor para latinos en EE.UU.
+        language="es-ES",
         timeout=5
     )
     gather.say("¿En qué puedo ayudarle hoy?")
@@ -202,21 +130,26 @@ def handle_incoming_call():
     return Response(str(resp), mimetype="text/xml")
 
 # ──────────────────────────────────────────────
-# Respuesta después del Gather (PSTN)
+# Respuesta después del Gather
 # ──────────────────────────────────────────────
 @bp.route("/response", methods=["POST"])
 def handle_response():
     to_number = request.values.get("To")
     user_speech = request.values.get("SpeechResult", "")
 
-    bot_cfg = load_bot(f"whatsapp:{to_number}")
-    system_prompt = bot_cfg.get("system_prompt", "Eres un asistente en español.")
-    model = bot_cfg.get("model", "gpt-4o")
-    voice = bot_cfg.get("realtime", {}).get("voice", "cedar")
+    bot_cfg = _load_bot_cfg_by_number_only_bots_folder(to_number)
+    if not bot_cfg:
+        resp = VoiceResponse()
+        resp.say("Lo siento, hubo un problema técnico.")
+        return Response(str(resp), mimetype="text/xml")
 
-    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+    system_prompt = _effective_system_prompt(bot_cfg) or "Eres un asistente en español."
+    model = _effective_model_text(bot_cfg)  # texto
+    voice = _effective_voice(bot_cfg)       # p. ej. "cedar"
 
-    # 1) Chat
+    headers = {"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}"}
+
+    # 1) Respuesta en texto del modelo
     with httpx.Client(timeout=30.0) as client:
         r = client.post(
             "https://api.openai.com/v1/chat/completions",
@@ -230,29 +163,25 @@ def handle_response():
             }
         )
         r.raise_for_status()
-    text_reply = r.json()["choices"][0]["message"]["content"]
+        text_reply = r.json()["choices"][0]["message"]["content"]
 
-    # 2) TTS → WAV 8 kHz
+    # 2) TTS en la voz definida por el bot (cedar, etc.)
     with httpx.Client(timeout=60.0) as client:
         r2 = client.post(
             "https://api.openai.com/v1/audio/speech",
             headers=headers,
-            json={
-                "model": "gpt-4o-mini-tts",
-                "voice": voice,
-                "input": text_reply,
-                "format": "wav",
-                "sample_rate": 8000,
-                "speed": 0.95
-            }
+            json={"model": "gpt-4o-mini-tts", "voice": voice, "input": text_reply}
         )
         r2.raise_for_status()
 
-    filename = f"reply_{os.getpid()}.wav"
+    # Guardar temporalmente el audio
+    os.makedirs(TMP_DIR, exist_ok=True)
+    filename = f"reply_{os.getpid()}.mp3"
     audio_path = os.path.join(TMP_DIR, filename)
     with open(audio_path, "wb") as f:
         f.write(r2.content)
 
+    # Twilio responde con <Play> usando URL pública
     resp = VoiceResponse()
     resp.play(f"{request.url_root}voice-realtime/media/{filename}")
     resp.say("¿Quiere más información? Puede hacer otra pregunta.")
@@ -260,8 +189,8 @@ def handle_response():
     return Response(str(resp), mimetype="text/xml")
 
 # ──────────────────────────────────────────────
-# Servir archivos temporales para Twilio (PSTN)
+# Servir archivos temporales para Twilio
 # ──────────────────────────────────────────────
 @bp.route("/media/<filename>", methods=["GET"])
 def serve_media(filename):
-    return send_from_directory(TMP_DIR, filename, mimetype="audio/wav")
+    return send_from_directory(TMP_DIR, filename, mimetype="audio/mpeg")
