@@ -145,7 +145,7 @@ def call_entry():
     resp.say(greeting, voice="Polly.Conchita", language="es-ES")
 
     # URL WSS para Twilio -> nuestro WS endpoint
-    ws_url = request.url_root.replace("http", "ws").rstrip("/") + url_for("voice_webrtc.stream_ws")
+    ws_url = request.url_root.replace("http", "ws").rstrip("/") + "/voice-webrtc/stream"
     ws_url += f"?to={to_number}"
 
     with resp.connect() as conn:
