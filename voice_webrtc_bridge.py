@@ -1,10 +1,11 @@
 # voice_webrtc_bridge.py
 # Bridge Twilio <Stream> (PCMU 8k) ↔ OpenAI Realtime WS (PCM16 16k)
 # Sin 'audioop' (eliminado en Python 3.13). Usamos NumPy.
+# + Emite “meter” del audio del BOT vía Twilio mark (no rompe el schema).
 
 import os, json, base64, time
-from flask import Blueprint, request, Response, current_app, url_for
-from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
+from flask import Blueprint, request, Response, current_app
+from twilio.twiml.voice_response import VoiceResponse
 import websocket  # websocket-client
 from threading import Thread
 
@@ -41,13 +42,8 @@ def _get_bot_cfg_by_any_number(bots_config: dict, to_number: str):
 
 # ---------- μ-law <-> PCM16 y resampling (NumPy) ----------
 
-# Constantes μ-law
-_MU = 255.0
-_BIAS = 132.0
-
 def _ulaw_to_linear(ulaw_bytes: bytes) -> np.ndarray:
     """Convierte bytes μ-law -> PCM16 (np.int16), a 8 kHz."""
-    # tabla vectorizada
     u = np.frombuffer(ulaw_bytes, dtype=np.uint8)
     u = ~u  # complemento a 1
     sign = (u & 0x80) != 0
@@ -57,7 +53,6 @@ def _ulaw_to_linear(ulaw_bytes: bytes) -> np.ndarray:
     x = magnitude - 0x84
     pcm = x.astype(np.int32)
     pcm[sign] = -pcm[sign]
-    # limitar a 16 bits
     pcm = np.clip(pcm, -32768, 32767).astype(np.int16)
     return pcm
 
@@ -68,9 +63,8 @@ def _linear_to_ulaw(pcm16: np.ndarray) -> bytes:
     x = np.abs(x)
     x = np.clip(x + 0x84, 0, 0x7FFF)
 
-    # calcular exponente (posición MSB)
+    # índice MSB aproximado sin bucles costosos
     def _msb_index(v):
-        # índice del bit más significativo (0..15); evitamos bucles
         idx = np.zeros_like(v)
         vv = v.copy()
         for shift in [8, 4, 2, 1]:
@@ -90,11 +84,9 @@ def _resample_linear(pcm: np.ndarray, sr_src: int, sr_dst: int) -> np.ndarray:
         return pcm
     ratio = sr_dst / float(sr_src)
     n_dst = int(round(pcm.size * ratio))
-    # indices de destino en origen
     x_old = np.arange(pcm.size)
     x_new = np.linspace(0, pcm.size - 1, num=n_dst)
     y_new = np.interp(x_new, x_old, pcm.astype(np.float32))
-    # clamp y convertir a int16
     y_new = np.clip(np.round(y_new), -32768, 32767).astype(np.int16)
     return y_new
 
@@ -111,6 +103,18 @@ def pcm16_16k_to_mulaw8k(pcm16k_bytes: bytes) -> str:
     pcm8k = _resample_linear(pcm16k, 16000, 8000)
     mulaw = _linear_to_ulaw(pcm8k)
     return base64.b64encode(mulaw).decode("ascii")
+
+# ---------- Nivel (RMS) para “esfera” ----------
+def _pcm16_bytes_rms_norm_0_1(pcm16_bytes: bytes) -> float:
+    """RMS normalizado (0..1) para PCM16LE mono."""
+    if not pcm16_bytes:
+        return 0.0
+    arr = np.frombuffer(pcm16_bytes, dtype=np.int16).astype(np.float32)
+    if arr.size == 0:
+        return 0.0
+    arr /= 32768.0
+    rms = float(np.sqrt(np.mean(arr * arr)))
+    return max(0.0, min(1.0, rms))
 
 # ---------- OpenAI Realtime (WebSocket) ----------
 def _openai_ws_connect(model: str, instructions: str, voice: str):
@@ -167,6 +171,7 @@ if sock:
           - Recibe JSONs de Twilio (event=start/media/stop)
           - Envía 'media' con audio μ-law para que Twilio lo reproduzca
           - Bridge con OpenAI Realtime (WebSocket)
+          - Emite “meter” del audio del BOT como mark (name="meter:NN")
         """
         # ---- Resolver bot/config por número ----
         to_number = request.args.get("to", "")
@@ -194,23 +199,52 @@ if sock:
                         msg = json.loads(raw)
                     except Exception:
                         continue
+
+                    if msg.get("type") == "response.created":
+                        # reiniciar si viene nueva respuesta
+                        pass
+
                     if msg.get("type") == "output_audio.delta":
+                        # Audio del BOT (PCM16 16k, base64)
                         pcm16 = base64.b64decode(msg.get("audio", "") or b"")
-                        if pcm16:
-                            b64_ulaw = pcm16_16k_to_mulaw8k(pcm16)
-                            if stream_sid:
+                        if not pcm16:
+                            continue
+
+                        # ⬇️ Emite nivel (0..100) como mark para UI/telemetría (no rompe schema Twilio)
+                        if stream_sid:
+                            level = int(_pcm16_bytes_rms_norm_0_1(pcm16) * 100)
+                            try:
                                 ws.send(json.dumps({
-                                    "event": "media",
+                                    "event": "mark",
                                     "streamSid": stream_sid,
-                                    "media": {"payload": b64_ulaw}
+                                    "mark": {"name": f"meter:{level}"}
                                 }))
+                            except Exception:
+                                # Si Twilio no admite mark en este momento, ignoramos
+                                pass
+
+                        # Convertir a μ-law 8k y mandar a Twilio para reproducir
+                        b64_ulaw = pcm16_16k_to_mulaw8k(pcm16)
+                        if stream_sid:
+                            ws.send(json.dumps({
+                                "event": "media",
+                                "streamSid": stream_sid,
+                                "media": {"payload": b64_ulaw}
+                            }))
+
+                    elif msg.get("type") == "response.completed":
+                        # Señal opcional de fin de respuesta (silencio natural)
+                        pass
+
             except Exception as e:
                 print(f"[BRIDGE] AI->Twilio terminado: {e}")
 
         t_out = Thread(target=pump_ai_to_twilio, daemon=True)
         t_out.start()
 
+        # Heurística simple para “detectar pausas” y disparar respuesta
         last_commit = 0.0
+        MIN_COMMIT_GAP = 1.2  # s
 
         try:
             while True:
@@ -225,20 +259,23 @@ if sock:
                 et = ev.get("event")
                 if et == "start":
                     stream_sid = (ev.get("start") or {}).get("streamSid")
+                    # limpiar buffer de entrada en OpenAI
                     ai.send(json.dumps({"type": "input_audio_buffer.clear"}))
                     last_commit = 0.0
 
                 elif et == "media":
                     payload = (ev.get("media") or {}).get("payload")
                     if payload:
+                        # Caller → OpenAI
                         pcm16 = mulaw8k_to_pcm16_16k(payload)
                         ai.send(json.dumps({
                             "type": "input_audio_buffer.append",
                             "audio": base64.b64encode(pcm16).decode("ascii")
                         }))
-                    # Heurística sencilla de VAD por tiempo
+
+                    # VAD temporal por tiempo (si pasó N seg, pedimos respuesta)
                     now = time.time()
-                    if now - last_commit > 1.2:
+                    if now - last_commit > MIN_COMMIT_GAP:
                         ai.send(json.dumps({"type": "input_audio_buffer.commit"}))
                         ai.send(json.dumps({"type": "response.create", "response": {"modalities": ["audio"]}}))
                         last_commit = now
