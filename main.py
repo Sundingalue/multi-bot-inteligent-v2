@@ -3,7 +3,7 @@
 # 💥💥 CORRECCIÓN FINAL 💥💥
 # Usar monkey_patch de eventlet en lugar de gevent
 import eventlet
-eventlet.monkey_patch()
+eventlet.monkey_patch(os=False)   # <— en vez de eventlet.monkey_patch()
 
 # Resto de importaciones
 from flask import Flask, request, session, redirect, url_for, send_file, send_from_directory, jsonify, render_template, make_response, Response
@@ -15,7 +15,6 @@ from dotenv import load_dotenv
 import os
 import json
 import time
-from threading import Thread
 from datetime import datetime, timedelta
 import csv
 from io import StringIO
@@ -1749,7 +1748,8 @@ def _wait_for_audio(call_sid, cache_key, timeout=15):
     """Espera hasta que el hilo haya generado el audio o se agote el tiempo."""
     start_time = time.time()
     while cache_key not in voice_call_cache and (time.time() - start_time) < timeout:
-        time.sleep(0.1)
+      eventlet.sleep(0.05)
+
     
     if cache_key in voice_call_cache:
         return voice_call_cache[cache_key].get("audio_file_name", "")
@@ -1772,7 +1772,7 @@ def voice_webhook():
     # ✅ CORRECCIÓN: Iniciar el procesamiento del saludo en un hilo separado
     # Se añade la entrada a voice_call_cache para que el hilo sepa dónde guardar el resultado
     voice_call_cache[f"{call_sid}_greeting"] = {"audio_file_name": "placeholder"}
-    Thread(target=_generate_and_store_greeting, args=(call_sid, bot_config), daemon=True).start()
+    eventlet.spawn_n(_generate_and_store_greeting, call_sid, bot_config)
 
     resp = VoiceResponse()
     # Usar <Gather> para escuchar la respuesta del usuario
@@ -1808,9 +1808,10 @@ def voice_gather():
     if user_speech:
         print(f"[VOICE] Mensaje del usuario: {user_speech}")
         
-        # ✅ CORRECCIÓN: Iniciar el procesamiento de la IA en un hilo separado
-        _thread_target_chat(call_sid, user_speech, bot_config)
-        audio_file_name = _wait_for_audio(call_sid, call_sid, timeout=15)
+       # Lanzar en green thread y esperar sin bloquear
+        eventlet.spawn_n(_thread_target_chat, call_sid, user_speech, bot_config)
+        audio_file_name = _wait_for_audio(call_sid, call_sid, timeout=12)
+
         
         if audio_file_name:
             print(f"[VOICE] Reproduciendo respuesta del bot desde: {audio_file_name}")
