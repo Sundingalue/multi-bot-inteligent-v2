@@ -11,12 +11,36 @@ bp = Blueprint("voice_realtime", __name__, url_prefix="/voice-realtime")
 TMP_DIR = "/tmp"
 
 # ──────────────────────────────────────────────
+# Helper: cargar bot tolerante al formato del número
+# ──────────────────────────────────────────────
+def _load_bot_for_to_number(to_number: str):
+    """
+    Intenta cargar el JSON del bot usando:
+    1) +E164 tal cual (p.ej. +18326213202.json)
+    2) whatsapp:+E164 (p.ej. whatsapp:+18326213202.json)
+    3) 'sundin' como último recurso para no devolver 500
+    """
+    for cand in (to_number, f"whatsapp:{to_number}", "sundin"):
+        try:
+            return load_bot(cand)
+        except Exception:
+            continue
+    return None
+
+# ──────────────────────────────────────────────
 # Llamada entrante
 # ──────────────────────────────────────────────
 @bp.route("/call", methods=["POST"])
 def handle_incoming_call():
     to_number = request.values.get("To")
-    bot_cfg = load_bot(f"whatsapp:{to_number}")
+    # ✅ cambio: uso de loader tolerante (evita 500 si no hay whatsapp:+ prefijo)
+    bot_cfg = _load_bot_for_to_number(to_number)
+
+    # Si no hay config válida, respondemos TwiML legible (sin 500)
+    if not bot_cfg:
+        resp = VoiceResponse()
+        resp.say("No hay configuración de bot para este número.")
+        return Response(str(resp), mimetype="text/xml")
 
     greeting = bot_cfg.get("greeting", "Hola, gracias por llamar.")
     resp = VoiceResponse()
@@ -46,7 +70,13 @@ def handle_response():
     to_number = request.values.get("To")
     user_speech = request.values.get("SpeechResult", "")
 
-    bot_cfg = load_bot(f"whatsapp:{to_number}")
+    # ✅ cambio: uso de loader tolerante
+    bot_cfg = _load_bot_for_to_number(to_number)
+    if not bot_cfg:
+        resp = VoiceResponse()
+        resp.say("No hay configuración de bot para este número.")
+        return Response(str(resp), mimetype="text/xml")
+
     system_prompt = bot_cfg.get("system_prompt", "Eres un asistente en español.")
     model = bot_cfg.get("model", "gpt-4o")
     voice = bot_cfg.get("realtime", {}).get("voice", "alloy")
@@ -77,6 +107,7 @@ def handle_response():
         )
 
     # Guardar temporalmente el audio
+    os.makedirs(TMP_DIR, exist_ok=True)  # ✅ seguro: no rompe nada y evita errores si /tmp no existe
     filename = f"reply_{os.getpid()}.mp3"
     audio_path = os.path.join(TMP_DIR, filename)
     with open(audio_path, "wb") as f:
