@@ -138,7 +138,12 @@ def call_entry():
     qs = urlencode({"to": to_number})
     ws_url = f"{ws_base}?{qs}"
     with resp.connect() as conn:
-        conn.stream(url=ws_url)
+     with conn.stream(url=ws_url) as s:
+        s.parameter(name="to_number",   value=(request.values.get("To") or ""))
+        s.parameter(name="from_number", value=(request.values.get("From") or ""))
+        # Opcional: fija el bot por nombre si quieres:
+        # s.parameter(name="bot_hint", value="ninafit")
+
     return Response(str(resp), mimetype="text/xml")
 
 # ---------- WebSocket Twilio <-> OpenAI ----------
