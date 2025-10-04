@@ -131,6 +131,8 @@ def _openai_ws_connect(model: str, instructions: str, voice: str):
             "instructions": instructions or "",
             "voice": voice or "alloy",
             "modalities": ["audio", "text"],
+            "input_audio_format":  { "type": "pcm16", "sample_rate": 16000 },  # ⬅️ NUEVO
+            "output_audio_format": { "type": "pcm16", "sample_rate": 16000 }   # ⬅️ NUEVO
         }
     }))
     return ws
@@ -267,12 +269,24 @@ if sock:
                     ai.send(json.dumps({"type": "input_audio_buffer.clear"}))
                     last_commit = 0.0
                     have_appended_since_last_commit["v"] = False
+                    # ⬅️ NUEVO: pequeño log de inicio (no afecta lógica)
+                    try:
+                        print(f"[CALL] start streamSid={stream_sid} to={to_number}")
+                    except:
+                        pass
 
                 elif et == "media":
                     payload = (ev.get("media") or {}).get("payload")
                     if payload:
                         # Caller → OpenAI
                         pcm16 = mulaw8k_to_pcm16_16k(payload)
+                        # ⬅️ NUEVO: verificación de nivel (para confirmar que Twilio sí manda audio)
+                        try:
+                            lvl = _pcm16_bytes_rms_norm_0_1(pcm16)
+                            if lvl > 0.01:
+                                print(f"[CALL] Nivel de entrada (RMS): {lvl:.3f}")
+                        except:
+                            pass
                         ai.send(json.dumps({
                             "type": "input_audio_buffer.append",
                             "audio": base64.b64encode(pcm16).decode("ascii")
@@ -288,6 +302,11 @@ if sock:
                         have_appended_since_last_commit["v"] = False
 
                 elif et == "stop":
+                    # ⬅️ NUEVO: log de cierre
+                    try:
+                        print("[CALL] stop")
+                    except:
+                        pass
                     break
 
         except Exception as e:
