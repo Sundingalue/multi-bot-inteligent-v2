@@ -8,6 +8,7 @@ from flask import Blueprint, request, Response, current_app
 from twilio.twiml.voice_response import VoiceResponse
 import websocket  # websocket-client
 from threading import Thread
+from urllib.parse import urlencode  # ⬅️ NUEVO: para URL-encode del '+'
 
 try:
     import numpy as np
@@ -41,7 +42,6 @@ def _get_bot_cfg_by_any_number(bots_config: dict, to_number: str):
     return (bots_config or {}).get(to_number)
 
 # ---------- μ-law <-> PCM16 y resampling (NumPy) ----------
-
 def _ulaw_to_linear(ulaw_bytes: bytes) -> np.ndarray:
     """Convierte bytes μ-law -> PCM16 (np.int16), a 8 kHz."""
     u = np.frombuffer(ulaw_bytes, dtype=np.uint8)
@@ -139,7 +139,9 @@ def _openai_ws_connect(model: str, instructions: str, voice: str):
 @bp.route("/call", methods=["POST"])
 def call_entry():
     """Twilio Voice webhook que inicia un <Connect><Stream> hacia nuestro WS."""
-    to_number = request.values.get("To", "")
+    to_number_raw = request.values.get("To", "")
+    to_number = _canonize_phone(to_number_raw)  # ⬅️ normalizar a +E.164
+
     bots = current_app.config.get("BOTS_CONFIG") or {}
     cfg = _get_bot_cfg_by_any_number(bots, to_number) or {}
 
@@ -148,9 +150,10 @@ def call_entry():
     # Saludo breve para evitar silencio inicial (lo genera Twilio, no TTS)
     resp.say(greeting, voice="Polly.Conchita", language="es-ES")
 
-    # URL WSS para Twilio -> nuestro WS endpoint
-    ws_url = request.url_root.replace("http", "ws").rstrip("/") + "/voice-webrtc/stream"
-    ws_url += f"?to={to_number}"
+    # URL WSS para Twilio -> nuestro WS endpoint (con '+ ' URL-encoded)
+    ws_base = request.url_root.replace("http", "ws").rstrip("/") + "/voice-webrtc/stream"
+    qs = urlencode({"to": to_number})  # ⬅️ preserva el '+' como %2B
+    ws_url = f"{ws_base}?{qs}"
 
     with resp.connect() as conn:
         conn.stream(url=ws_url)
@@ -186,6 +189,7 @@ if sock:
 
         stream_sid = None
         stop_flag = {"stop": False}
+        have_appended_since_last_commit = {"v": False}
 
         # Bomba: OpenAI -> Twilio
         def pump_ai_to_twilio():
@@ -200,11 +204,8 @@ if sock:
                     except Exception:
                         continue
 
-                    if msg.get("type") == "response.created":
-                        # reiniciar si viene nueva respuesta
-                        pass
-
-                    if msg.get("type") == "output_audio.delta":
+                    # ✅ Evento correcto del Realtime para audio del bot:
+                    if msg.get("type") == "response.audio.delta":
                         # Audio del BOT (PCM16 16k, base64)
                         pcm16 = base64.b64decode(msg.get("audio", "") or b"")
                         if not pcm16:
@@ -220,7 +221,6 @@ if sock:
                                     "mark": {"name": f"meter:{level}"}
                                 }))
                             except Exception:
-                                # Si Twilio no admite mark en este momento, ignoramos
                                 pass
 
                         # Convertir a μ-law 8k y mandar a Twilio para reproducir
@@ -232,8 +232,9 @@ if sock:
                                 "media": {"payload": b64_ulaw}
                             }))
 
-                    elif msg.get("type") == "response.completed":
-                        # Señal opcional de fin de respuesta (silencio natural)
+                    # (opcional) logs de lifecycle
+                    elif msg.get("type") in ("response.created", "response.completed", "session.updated"):
+                        # print("[AI]", msg.get("type"))
                         pass
 
             except Exception as e:
@@ -247,6 +248,9 @@ if sock:
         MIN_COMMIT_GAP = 1.2  # s
 
         try:
+            # 🔸 Disparo inicial por si tarda en llegar audio del usuario:
+            ai.send(json.dumps({"type": "response.create", "response": {"modalities": ["audio"]}}))
+
             while True:
                 incoming = ws.receive()
                 if incoming is None:
@@ -262,6 +266,7 @@ if sock:
                     # limpiar buffer de entrada en OpenAI
                     ai.send(json.dumps({"type": "input_audio_buffer.clear"}))
                     last_commit = 0.0
+                    have_appended_since_last_commit["v"] = False
 
                 elif et == "media":
                     payload = (ev.get("media") or {}).get("payload")
@@ -272,13 +277,15 @@ if sock:
                             "type": "input_audio_buffer.append",
                             "audio": base64.b64encode(pcm16).decode("ascii")
                         }))
+                        have_appended_since_last_commit["v"] = True
 
                     # VAD temporal por tiempo (si pasó N seg, pedimos respuesta)
                     now = time.time()
-                    if now - last_commit > MIN_COMMIT_GAP:
+                    if now - last_commit > MIN_COMMIT_GAP and have_appended_since_last_commit["v"]:
                         ai.send(json.dumps({"type": "input_audio_buffer.commit"}))
                         ai.send(json.dumps({"type": "response.create", "response": {"modalities": ["audio"]}}))
                         last_commit = now
+                        have_appended_since_last_commit["v"] = False
 
                 elif et == "stop":
                     break
