@@ -5,7 +5,6 @@
 # + Emite “meter” del audio del BOT vía Twilio mark (no rompe el schema).
 # + Fixes: formatos Realtime, modalidades, y commit con >100ms de audio.
 # + Extra: VAD simple por silencio, logs de commit y keepalive al WS Realtime.
-# + NEW: fallback de commit por tiempo (si no hay silencio) y session.update con customParameters.
 
 import os, json, base64, time, threading
 from flask import Blueprint, request, Response, current_app
@@ -200,11 +199,15 @@ if sock:
         stream_sid = None
         stop_flag = {"stop": False}
 
+        # Control de buffer / commits
         have_appended_since_last_commit = {"v": False}
         appended_samples_since_last_commit = {"n": 0}
         last_commit_time = 0.0
         last_append_time = 0.0
         greeting_sent = False
+
+        # Control de respuestas activas (evita 'active_response')
+        ai_busy = {"v": False}
 
         # ---- AI -> Twilio ----
         out_frames = 0
@@ -250,10 +253,14 @@ if sock:
                             if out_frames in (1, 50, 200) or out_frames % 200 == 0:
                                 print(f"[OUT] frames={out_frames}")
 
+                    elif t == "response.created":
+                        ai_busy["v"] = True
+                    elif t == "response.completed":
+                        ai_busy["v"] = False
                     elif t == "error":
                         print(f"[AI ] ERROR: {msg}")
-                    elif t in ("response.created", "response.completed", "session.updated"):
-                        # Logs silenciosos
+                    else:
+                        # otros mensajes silenciosos
                         pass
 
             except Exception as e:
@@ -264,9 +271,8 @@ if sock:
 
         # Umbrales (≥100ms requerido por Realtime; usamos 200ms para ir seguros)
         MIN_COMMIT_GAP_SEC = 1.2      # no spamear commits
-        MIN_SILENCE_GAP_SEC = 0.3     # bajamos a 300ms para facilitar VAD
+        MIN_SILENCE_GAP_SEC = 0.6     # 600ms de silencio
         MIN_COMMIT_SAMPLES = 3200     # 200ms * 16k
-        HARD_COMMIT_EVERY_SEC = 2.0   # ⬅️ nuevo: commit por tiempo si nunca hay silencio
 
         try:
             frames = 0
@@ -284,6 +290,7 @@ if sock:
                     start_obj = ev.get("start") or {}
                     stream_sid = start_obj.get("streamSid")
                     custom = (start_obj.get("customParameters") or {})
+
                     # Leemos parámetros enviados desde main.py (/voice)
                     to_p = custom.get("to_number") or to_number_qs or ""
                     from_p = custom.get("from_number") or ""
@@ -292,7 +299,6 @@ if sock:
                     # Intentamos refrescar config de bot por número/bot_hint:
                     cfg2 = None
                     if bot_hint:
-                        # buscar por nombre de bot
                         for c in (bots or {}).values():
                             if isinstance(c, dict) and c.get("name", "").strip().lower() == bot_hint:
                                 cfg2 = c
@@ -324,6 +330,8 @@ if sock:
                     last_append_time = 0.0
                     have_appended_since_last_commit["v"] = False
                     appended_samples_since_last_commit["n"] = 0
+                    ai_busy["v"] = False  # por si acaso
+
                     try:
                         ai.send(json.dumps({"type": "input_audio_buffer.clear"}))
                     except Exception:
@@ -373,24 +381,23 @@ if sock:
                         except Exception as e:
                             print(f"[AI ] append error: {e}")
 
-                    # Heurística de commit:
+                    # Heurística de commit (solo si realmente hubo audio y no hay respuesta activa)
                     if have_appended_since_last_commit["v"]:
                         enough_audio = appended_samples_since_last_commit["n"] >= MIN_COMMIT_SAMPLES
                         long_enough_since_last_commit = (now - last_commit_time) >= MIN_COMMIT_GAP_SEC
                         silence_since_last_append = (now - last_append_time) >= MIN_SILENCE_GAP_SEC
-                        time_fallback = (now - last_commit_time) >= HARD_COMMIT_EVERY_SEC  # ⬅️ nuevo
 
-                        if (enough_audio and long_enough_since_last_commit and (silence_since_last_append or time_fallback)):
+                        if enough_audio and long_enough_since_last_commit and silence_since_last_append and (not ai_busy["v"]):
                             print(f"[COMMIT] samples={appended_samples_since_last_commit['n']} "
                                   f"since_last_append={now - last_append_time:.3f}s "
-                                  f"gap={now - last_commit_time:.3f}s "
-                                  f"fallback={'YES' if time_fallback and not silence_since_last_append else 'NO'}")
+                                  f"gap={now - last_commit_time:.3f}s")
                             try:
                                 ai.send(json.dumps({"type": "input_audio_buffer.commit"}))
                                 ai.send(json.dumps({
                                     "type": "response.create",
                                     "response": { "modalities": ["audio", "text"] }
                                 }))
+                                ai_busy["v"] = True  # hasta que llegue response.created/completed
                             except Exception as e:
                                 print(f"[AI ] commit error: {e}")
                             last_commit_time = now
