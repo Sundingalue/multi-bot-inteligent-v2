@@ -2,24 +2,26 @@
 Flask==3.0.3
 gunicorn>=21.2.0
 
-# Asincronía para Websockets (SOLUCIÓN)
-eventlet
-gevent>=24.2.1
-gevent-websocket>=0.10.1
+# Asincronía para WebSockets (usamos eventlet, NO gevent)
+eventlet==0.36.1
 flask-sock==0.7.0
+simple-websocket
 flask-cors==4.0.0
 websocket-client==1.8.0
-simple-websocket
-requests==2.32.3
-pytz
-numpy
 
+# HTTP clients
+requests==2.32.3
+httpx==0.27.0
+
+# Time & NumPy (audio)
+pytz
+numpy>=1.26.0,<3
 
 # SDK de OpenAI
-openai>=1.12.0
+openai>=1.12.0,<2
 
 # Librerías de Twilio
-twilio
+twilio>=9,<10
 
 # Librerías de Firebase y Google
 firebase-admin==6.5.0

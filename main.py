@@ -53,7 +53,9 @@ app.register_blueprint(profiles_bp)
 app.register_blueprint(voice_rt_bp)
 
 app.register_blueprint(webrtc_bridge_bp)  # Rutas /voice-webrtc/*
-webrtc_sock.init_app(app)                  # Inicializa WebSocket /voice-webrtc/stream
+# ⚠️ Evita AttributeError si sock no está disponible
+if webrtc_sock:
+    webrtc_sock.init_app(app)              # Inicializa WebSocket /voice-webrtc/stream
 
 
 # =======================
@@ -212,6 +214,13 @@ from bots.api_mobile import mobile_bp
 from instagram_webhook import ig_bp
 from instagram_api_multi import ig_multi_bp   # 👈 Import nuevo aquí
 from billing_api import billing_bp
+
+# Fallback suave por si record_openai_usage no está expuesto en billing_api
+try:
+    from billing_api import record_openai_usage  # type: ignore
+except Exception:
+    def record_openai_usage(*args, **kwargs):
+        return None
 
 app.register_blueprint(mobile_bp, url_prefix="/api/mobile")
 app.register_blueprint(ig_bp)  # expone /webhook_instagram (GET verificación, POST eventos)
@@ -953,41 +962,6 @@ def api_instagram_exchange_code():
         print(f"❌ Error intercambiando code Instagram: {e}")
         return jsonify({"error": "Fallo al procesar login Instagram"}), 500
 
-
-    try:
-        # 1) Intercambiar el code por el access_token en la API de Meta
-        resp = requests.post(
-            "https://graph.facebook.com/v21.0/oauth/access_token",
-            data={
-                "client_id": os.getenv("IG_CLIENT_ID"),
-                "client_secret": os.getenv("IG_CLIENT_SECRET"),
-                "redirect_uri": "https://inhoustontexas.us/ig_auth_redirect",
-                "code": code,
-            },
-            timeout=10,
-        )
-        token_data = resp.json()
-        access_token = token_data.get("access_token")
-        user_id = token_data.get("user_id")  # Meta devuelve user_id de la cuenta IG
-
-        if not access_token:
-            return f"❌ No se recibió access_token: {token_data}", 400
-
-        # 2) Guardar en Firebase (bajo nodo users/{user_id})
-        ref = db.reference(f"instagram_users/{user_id}")
-        ref.set({
-            "access_token": access_token,
-            "user_id": user_id,
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        })
-
-        print(f"[IG] Login exitoso para user_id={user_id}")
-        return f"✅ Login Instagram exitoso. Token guardado para user {user_id}"
-
-    except Exception as e:
-        print(f"❌ Error en intercambio de token IG: {e}")
-        return "❌ Error procesando login de Instagram", 500
-
 # =======================
 #  Guardar/Exportar
 # =======================
@@ -1254,12 +1228,12 @@ def push_topic():
 
     # Datos opcionales para deep-link en la app
     data = _push_common_data({
-    "url": body.get("url") or body.get("link") or "",   # 👈 añadido
-    "link": body.get("link") or "",
-    "screen": body.get("screen") or "",
-    "empresaId": body.get("empresaId") or "",
-    "categoria": body.get("categoria") or ""
-})
+        "url": body.get("url") or body.get("link") or "",   # 👈 añadido
+        "link": body.get("link") or "",
+        "screen": body.get("screen") or "",
+        "empresaId": body.get("empresaId") or "",
+        "categoria": body.get("categoria") or ""
+    })
 
     if not title or not body_text:
         return jsonify({"success": False, "message": "title/body requeridos"}), 400
@@ -1291,12 +1265,12 @@ def push_token():
     tokens = body.get("tokens") if isinstance(body.get("tokens"), list) else None
 
     data = _push_common_data({
-    "url": body.get("url") or body.get("link") or "",   # 👈 NUEVO
-    "link": body.get("link") or "",
-    "screen": body.get("screen") or "",
-    "empresaId": body.get("empresaId") or "",
-    "categoria": body.get("categoria") or ""
-})
+        "url": body.get("url") or body.get("link") or "",   # 👈 NUEVO
+        "link": body.get("link") or "",
+        "screen": body.get("screen") or "",
+        "empresaId": body.get("empresaId") or "",
+        "categoria": body.get("categoria") or ""
+    })
 
     if not title or not body_text:
         return jsonify({"success": False, "message": "title/body requeridos"}), 400
@@ -1351,12 +1325,12 @@ def push_universal():
     tokens = body.get("tokens") if isinstance(body.get("tokens"), list) else None
 
     data = _push_common_data({
-    "url": body.get("url") or body.get("link") or "",   # 👈 NUEVO
-    "link": body.get("link") or "",
-    "screen": body.get("screen") or "",
-    "empresaId": body.get("empresaId") or "",
-    "categoria": body.get("categoria") or ""
-})
+        "url": body.get("url") or body.get("link") or "",   # 👈 NUEVO
+        "link": body.get("link") or "",
+        "screen": body.get("screen") or "",
+        "empresaId": body.get("empresaId") or "",
+        "categoria": body.get("categoria") or ""
+    })
 
     if not title or not body_text:
         return jsonify({"success": False, "message": "title/body requeridos"}), 400
@@ -1650,7 +1624,6 @@ def whatsapp_bot():
 # =======================
 #  🔊 VOZ 100% Realtime (Twilio Media Streams → OpenAI Realtime)
 # =======================
-from twilio.twiml.voice_response import VoiceResponse, Connect  # (Gather ya no se usa)
 
 @app.route("/voice", methods=["POST"])
 def voice_webhook():
