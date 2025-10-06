@@ -12,6 +12,7 @@ websocket-client==1.8.0
 simple-websocket
 requests==2.32.3
 pytz
+numpy==2.1.1   # (compatible con Python 3.12 y con wheels precompilados)
 
 
 # SDK de OpenAI
