@@ -1,6 +1,6 @@
 # Core Flask y servidor web
 Flask==3.0.3
-gunicorn>=21.2.0
+gunicorn==21.2.0
 
 # Asincronía para WebSockets (usamos eventlet, NO gevent)
 eventlet==0.36.1
