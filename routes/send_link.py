@@ -21,7 +21,7 @@ def _to_e164_us(raw: str) -> str:
 
 def _build_url(base: str, name: str, phone: str, source: str):
     if not base:
-        return "https://example.com/agenda"
+        return ""
     qs = urllib.parse.urlencode({"name": name or "", "phone": phone or "", "source": source or "bot"})
     return f"{base}{'&' if '?' in base else '?'}{qs}"
 
@@ -33,7 +33,8 @@ def send_link():
       "bot": "whatsapp:+18326213202",   // OBLIGATORIO (clave para load_bot)
       "phone": "8326213202",            // OBLIGATORIO (US 10 dígitos)
       "channel": "sms" | "wa",          // opcional (default sms)
-      "name": "Carlos"                  // opcional
+      "name": "Carlos",                 // opcional
+      "link": "https://lo-que-sea.com/x"// opcional: si viene, se envía tal cual
       // overrides opcionales si NO están en el JSON del bot:
       // "from": "+1832XXXXXXX", "sid": "AC...", "token": "..."
     }
@@ -43,9 +44,10 @@ def send_link():
     if not bot_key:
         return jsonify({"ok": False, "error": "BOT_REQUIRED"}), 400
 
-    phone   = (data.get("phone") or "").strip()
-    name    = (data.get("name") or "").strip()
-    channel = (data.get("channel") or "sms").strip().lower()
+    phone    = (data.get("phone") or "").strip()
+    name     = (data.get("name") or "").strip()
+    channel  = (data.get("channel") or "sms").strip().lower()
+    req_link = (data.get("link") or "").strip()
 
     # normaliza teléfono
     to_e164 = _to_e164_us(phone)
@@ -59,11 +61,19 @@ def send_link():
         current_app.logger.exception(f"[send-link] load_bot({bot_key}) error: {e}")
         return jsonify({"ok": False, "error": "BOT_LOAD_ERROR", "detail": str(e)}), 400
 
-    # booking url por bot
-    base_url = (_get(cfg, ["booking", "url"])
-                or _get(cfg, ["calendar", "url"])
-                or _get(cfg, ["booking_url"]))
-    link = _build_url(base_url, name=name, phone=phone, source=channel)
+    # 1) Si viene 'link' en el body, se usa tal cual
+    link = req_link
+
+    # 2) Si no viene, lo armamos desde el JSON del bot
+    if not link:
+        base_url = (_get(cfg, ["booking", "url"])
+                    or _get(cfg, ["calendar", "url"])
+                    or _get(cfg, ["booking_url"]))
+        link = _build_url(base_url, name=name, phone=phone, source=channel)
+
+    if not link:
+        return jsonify({"ok": False, "error": "LINK_MISSING",
+                        "detail": "No llegó 'link' y el bot no tiene booking.url/calendar.url/booking_url."}), 400
 
     # remitente y credenciales por bot (con override opcional del request)
     use_wa = (channel in ("wa", "whatsapp"))
@@ -79,7 +89,9 @@ def send_link():
                         "detail": "Faltan from/sid/token en el JSON del bot o en el request."}), 400
 
     client = Client(sid, token)
-    body = f"Hola{name and ' ' + name or ''}, aquí está tu enlace para agendar: {link}\n— In Houston Texas"
+
+    # Solo enviamos el link, sin relleno
+    body = f"Aquí está tu enlace: {link}"
 
     to_fmt   = f"whatsapp:{to_e164}" if use_wa else to_e164
     from_fmt = f"whatsapp:{from_number}" if use_wa else from_number
@@ -90,3 +102,4 @@ def send_link():
     except Exception as e:
         current_app.logger.exception(f"[send-link] Twilio error: {e}")
         return jsonify({"ok": False, "error": "TWILIO_ERROR", "detail": str(e)}), 500
+
