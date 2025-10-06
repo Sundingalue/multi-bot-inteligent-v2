@@ -1,37 +1,34 @@
+# Core Flask y servidor web
 Flask==3.0.3
-gunicorn==21.2.0
+gunicorn>=21.2.0
 
-# WebSockets con gevent (NO eventlet)
+# Asincronía para Websockets (SOLUCIÓN)
+eventlet
+gevent>=24.2.1
+gevent-websocket>=0.10.1
 flask-sock==0.7.0
-simple-websocket==1.0.0
 flask-cors==4.0.0
 websocket-client==1.8.0
-gevent==24.2.1
-gevent-websocket==0.10.1
-
-# HTTP clients
+simple-websocket
 requests==2.32.3
-httpx==0.27.0
-
-# Time & NumPy (audio)
 pytz
-numpy>=1.26.0,<3
+
 
 # SDK de OpenAI
-openai>=1.12.0,<2
+openai>=1.12.0
 
-# Twilio
-twilio>=9,<10
+# Librerías de Twilio
+twilio
 
-# Firebase / Google
+# Librerías de Firebase y Google
 firebase-admin==6.5.0
 google-api-python-client
 google-auth
 google-auth-httplib2
 google-auth-oauthlib
 
-# Env
+# Manejo de variables de entorno
 python-dotenv>=1.0.1,<2
 
-# Pagos
+# Procesamiento de pagos
 stripe==10.10.0
