@@ -1,9 +1,8 @@
-# web/send_link.py
+# routes/send_link.py
 import urllib.parse
 from flask import Blueprint, request, jsonify, current_app
 from twilio.rest import Client
-
-from utils.bot_loader import load_bot  # <- tu loader existente
+from utils.bot_loader import load_bot  # tu loader existente
 
 bp = Blueprint("send_link", __name__, url_prefix="/actions")
 

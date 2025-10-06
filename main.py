@@ -5,6 +5,10 @@
 import eventlet
 eventlet.monkey_patch(os=False)   # <— en vez de eventlet.monkey_patch()
 
+import os, sys
+sys.path.append(os.path.dirname(__file__))
+
+
 # Resto de importaciones
 from flask import Flask, request, session, redirect, url_for, send_file, send_from_directory, jsonify, render_template, make_response, Response
 import pathlib
