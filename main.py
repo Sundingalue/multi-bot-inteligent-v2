@@ -52,6 +52,10 @@ app.register_blueprint(realtime_bp)
 app.register_blueprint(profiles_bp)
 app.register_blueprint(voice_rt_bp)
 
+from web.booking_actions import bp as booking_actions_bp
+app.register_blueprint(booking_actions_bp)
+
+
 app.register_blueprint(webrtc_bridge_bp)  # Rutas /voice-webrtc/*
 # ⚠️ Evita AttributeError si sock no está disponible
 if webrtc_sock:
