@@ -1,0 +1,66 @@
+{
+  "whatsapp:+18326213202": {
+    "name": "Nina",
+    "business_name": "Houston School of Esthetics & Massage",
+    "model": "gpt-4o",
+    "temperature": 0.6,
+
+    "agent": {
+      "name": "Sarah",
+      "role": "Asistente Virtual",
+      "persona": "Amable, servicial, motivadora, profesional"
+    },
+
+    "realtime": {
+      "model": "gpt-4o-realtime-preview-2024-12-17",
+      "voice": "cedar"
+    },
+
+    "auth": {
+      "username": "fit2025",
+      "password": "fit2025",
+      "panel": "panel_bot"
+    },
+
+    "phone": "+1 832-621-3202",
+
+    "billing": {
+      "id": "client_004",
+      "description": "Consumo mensual Fit And healthy"
+    },
+
+    "greeting": "Hola, gracias por llamar a Houston School of Esthetics & Massage. Mi nombre es Sarah, ¿en qué puedo ayudarle hoy?",
+    "system_prompt": "… (tu prompt largo aquí, lo mantuve igual) …",
+
+    "slug": "whatsapp:+18326213202",
+    "whatsapp_number": "whatsapp:+18326213202",
+
+    "eleven_agent_id": "agent_3101k3a58zgdfgwsr0dhtm3v0z1c",
+
+    "notify": {
+      "emails": ["sundingalue@gmail.com"]
+    },
+
+    "booking": {
+      "url": "https://calendly.com/"
+    },
+
+    "twilio": {
+      "sms":        { "from": "+18326213202" },
+      "whatsapp":   { "from": "+18326213202" },
+      "account_sid": "${TWILIO_ACCOUNT_SID}",
+      "auth_token": "${TWILIO_AUTH_TOKEN}"
+    },
+
+    "channels": {
+      "instagram": {
+        "page_id": "131837286675681",
+        "ig_user_id": "17841460637585682",
+        "intro_message": "¡Soy Sara, representante de ventas de In Houston Texas. ¿Con quién tengo el gusto? 😊"
+      },
+      "whatsapp": {
+        "from": "+18326213202"
+      }
+    }
+  }
+}
