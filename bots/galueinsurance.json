@@ -1,5 +1,5 @@
 {
-  "whatsapp:+18325512420": {
+  "whatsapp:+183255124": {
     "name": "Camila",
     "business_name": "Senior Life",
     "model": "gpt-4o",
@@ -12,7 +12,7 @@
     },
 
     "email": "poliza.seniorlife@gmail.com",
-    "phone": "+1 832-551-2420",
+    "phone": "+1 832-551-24",
 
     "billing": {
       "id": "client_001",

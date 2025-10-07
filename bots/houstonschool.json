@@ -1,5 +1,5 @@
 {
-  "whatsapp:+18326213202": {
+  "whatsapp:+18325512420": {
     "name": "Nina",
     "business_name": "Houston School of Esthetics & Massage",
     "model": "gpt-4o",
@@ -22,7 +22,7 @@
       "panel": "panel_bot"
     },
 
-    "phone": "+1 832-621-3202",
+    "phone": "+1 832-551-2420",
 
     "billing": {
       "id": "client_004",
@@ -32,8 +32,8 @@
     "greeting": "Hola, gracias por llamar a Houston School of Esthetics & Massage. Mi nombre es Sarah, ¿en qué puedo ayudarle hoy?",
     "system_prompt": "… (tu prompt largo aquí, lo mantuve igual) …",
 
-    "slug": "whatsapp:+18326213202",
-    "whatsapp_number": "whatsapp:+18326213202",
+    "slug": "whatsapp:+18325512420",
+    "whatsapp_number": "whatsapp:+18325512420",
 
     "eleven_agent_id": "agent_3101k3a58zgdfgwsr0dhtm3v0z1c",
 
@@ -46,8 +46,8 @@
     },
 
     "twilio": {
-      "sms":        { "from": "+18326213202" },
-      "whatsapp":   { "from": "+18326213202" },
+      "sms":        { "from": "+18325512420" },
+      "whatsapp":   { "from": "+18325512420" },
       "account_sid": "${TWILIO_ACCOUNT_SID}",
       "auth_token": "${TWILIO_AUTH_TOKEN}"
     },
@@ -59,7 +59,7 @@
         "intro_message": "¡Soy Sara, representante de ventas de In Houston Texas. ¿Con quién tengo el gusto? 😊"
       },
       "whatsapp": {
-        "from": "+18326213202"
+        "from": "+18325512420"
       }
     }
   }
