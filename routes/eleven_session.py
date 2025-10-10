@@ -1,24 +1,32 @@
-# routes/eleven_session.py
-# Endpoint para crear un token efímero de ElevenLabs Realtime (WebRTC)
-# Se registra como Blueprint en main.py.
+# eleven_session.py
+# Endpoint para crear sesión efímera de voz (ElevenLabs) y proxy de SDP WebRTC.
+# Toma el agent_id desde tu JSON de "tarjeta inteligente", NO desde .env.
 
 import os
+import time
+import uuid
 import requests
 from flask import Blueprint, jsonify, request, make_response
 from utils.bot_loader import load_bot
 
 bp = Blueprint("eleven", __name__, url_prefix="/eleven")
 
-# Defaults (puedes sobreescribir por bot en bots/*.json)
-ELEVEN_API_KEY_ENV   = (os.getenv("ELEVEN_API_KEY") or "").strip()
-ELEVEN_AGENT_ID_ENV  = (os.getenv("ELEVEN_AGENT_ID") or "").strip()
-ELEVEN_VOICE_ID_ENV  = (os.getenv("ELEVEN_VOICE_ID") or "").strip()  # opcional
-ELEVEN_RTC_URL_ENV   = (os.getenv("ELEVEN_RTC_URL") or "https://api.elevenlabs.io/v1/convai/rtc").strip()
+# ==============================
+# Config
+# ==============================
+XI_API_KEY = (os.getenv("ELEVEN_API_KEY") or os.getenv("XI_API_KEY") or "").strip()
+ELEVEN_SDP_ENDPOINT = "https://api.elevenlabs.io/v1/convai/conversations"  # endpoint WebRTC (SDP)
 
-# Endpoint oficial para token efímero
-ELEVEN_TOKEN_URL     = "https://api.elevenlabs.io/v1/convai/conversation/get-token"
+# Tokens efímeros (memoria de proceso)
+# token -> {"agent_id": str, "exp": epoch_s}
+_ISSUED = {}
+_TTL_SECONDS = 120  # 2 minutos de validez para el token efímero
 
+# ==============================
+# Helpers
+# ==============================
 def _corsify(resp):
+    """CORS básico por origen (útil cuando no aplica after_request global)."""
     origin = request.headers.get("Origin", "")
     if origin:
         resp.headers["Access-Control-Allow-Origin"] = origin
@@ -28,96 +36,151 @@ def _corsify(resp):
         resp.headers["Access-Control-Max-Age"] = "86400"
     return resp
 
-def _get_bot_cfg(bot_id: str) -> dict:
-    try:
-        return load_bot(bot_id)
-    except Exception:
-        return {}
+def _scheme():
+    # respeta proxy/CDN
+    xfp = (request.headers.get("X-Forwarded-Proto") or "").lower()
+    if xfp in ("http", "https"):
+        return xfp
+    return "https" if request.is_secure else "http"
 
-def _effective_eleven_cfg(bot_cfg: dict):
-    """
-    Prioridad: JSON del bot > variables de entorno.
-    Soporta estos campos dentro de bots/*.json:
-      {
-        "eleven": {
-          "agent_id": "...",
-          "voice_id": "...",       # opcional
-          "rtc_url": "https://api.elevenlabs.io/v1/convai/rtc"  # opcional
-        }
-      }
-    """
-    eleven = (bot_cfg.get("eleven") or {}) if isinstance(bot_cfg, dict) else {}
-    api_key  = ELEVEN_API_KEY_ENV
-    agent_id = (eleven.get("agent_id") or ELEVEN_AGENT_ID_ENV).strip()
-    voice_id = (eleven.get("voice_id") or ELEVEN_VOICE_ID_ENV).strip()
-    rtc_url  = (eleven.get("rtc_url")  or ELEVEN_RTC_URL_ENV).strip() or "https://api.elevenlabs.io/v1/convai/rtc"
-    return api_key, agent_id, voice_id, rtc_url
+def _host_base():
+    return f"{_scheme()}://{request.host}"
 
+def _trim_issued():
+    now = int(time.time())
+    bad = [t for t, rec in _ISSUED.items() if int(rec.get("exp", 0)) < now]
+    for t in bad:
+        _ISSUED.pop(t, None)
+
+def _get_eleven_agent_id(bot_cfg: dict) -> str:
+    if not isinstance(bot_cfg, dict):
+        return ""
+    # Campo principal en tu JSON:
+    aid = (bot_cfg.get("eleven_agent_id") or "").strip()
+    if aid:
+        return aid
+    # fallback opcional por si lo mueven dentro de "realtime"
+    rt = bot_cfg.get("realtime") or {}
+    return (rt.get("eleven_agent_id") or "").strip()
+
+# ==============================
+# Health
+# ==============================
 @bp.get("/health")
 def health():
-    ok = bool(ELEVEN_API_KEY_ENV or ELEVEN_AGENT_ID_ENV)
+    ok = bool(XI_API_KEY)
     resp = jsonify({
         "ok": ok,
-        "service": "eleven_realtime",
-        "defaults": {
-            "has_api_key": bool(ELEVEN_API_KEY_ENV),
-            "agent_id_set": bool(ELEVEN_AGENT_ID_ENV),
-            "rtc_url": ELEVEN_RTC_URL_ENV
-        }
+        "service": "eleven",
+        "has_api_key": bool(XI_API_KEY),
+        "token_count": len(_ISSUED),
+        "ttl_seconds": _TTL_SECONDS
     })
     return _corsify(resp)
 
+# ==============================
+# POST /eleven/session
+# Crea token efímero y devuelve rtc_url a nuestro proxy /eleven/webrtc
+# ==============================
 @bp.route("/session", methods=["POST", "OPTIONS"])
 def create_session():
-    """
-    Devuelve un token efímero para ElevenLabs Realtime:
-      POST /eleven/session?bot=<slug|id>
-    Response:
-      { ok: true, token: "...", rtc_url: "https://api.elevenlabs.io/v1/convai/rtc" }
-    """
     if request.method == "OPTIONS":
         return _corsify(make_response(("", 204)))
 
-    bot_id = request.args.get("bot") or request.headers.get("X-Bot-Id") or "sundin"
-    bot_cfg = _get_bot_cfg(bot_id)
-    api_key, agent_id, voice_id, rtc_url = _effective_eleven_cfg(bot_cfg)
-
-    if not api_key:
+    if not XI_API_KEY:
         return _corsify(jsonify({"ok": False, "error": "ELEVEN_API_KEY no configurada"})), 500
-    if not agent_id:
-        return _corsify(jsonify({"ok": False, "error": "ELEVEN_AGENT_ID no configurada (env o bots/*.json)"})), 400
 
-    payload = {"agent_id": agent_id}
-    if voice_id:
-        # voice_id es opcional; si no lo pones, usa el del Agent en Eleven
-        payload["voice_id"] = voice_id
+    # Descubrir bot desde ?bot= | X-Bot-Id | body.bot | fallback "sundin"
+    bot_id = request.args.get("bot") or request.headers.get("X-Bot-Id")
+    body = request.get_json(silent=True) or {}
+    if not bot_id:
+        bot_id = body.get("bot") or "sundin"
 
     try:
-        r = requests.post(
-            ELEVEN_TOKEN_URL,
-            headers={"xi-api-key": api_key, "Content-Type": "application/json"},
-            json=payload,
-            timeout=20,
+        bot_cfg = load_bot(bot_id)
+    except Exception:
+        bot_cfg = load_bot("sundin")
+
+    agent_id = _get_eleven_agent_id(bot_cfg)
+    if not agent_id:
+        return _corsify(jsonify({"ok": False, "error": "eleven_agent_id no definido en la tarjeta"})), 400
+
+    # Generar token efímero propio
+    tok = uuid.uuid4().hex
+    _ISSUED[tok] = {"agent_id": agent_id, "exp": int(time.time()) + _TTL_SECONDS}
+    _trim_issued()
+
+    # rtc_url = proxy local; el front hará POST SDP aquí (no exponemos el XI key)
+    rtc_url = f"{_host_base()}/eleven/webrtc?token={tok}"
+
+    # (Opcional) devolvemos eco de configuración para debug front
+    resp = jsonify({
+        "ok": True,
+        "token": tok,          # solo para debug local (no se usa como Bearer)
+        "rtc_url": rtc_url,
+        "agent_id_hint": agent_id[:6] + "…" if len(agent_id) > 6 else agent_id
+    })
+    return _corsify(resp)
+
+# ==============================
+# POST /eleven/webrtc?token=...
+# Proxy de SDP → ElevenLabs (con XI_API_KEY) → devuelve SDP answer (text/plain)
+# ==============================
+@bp.route("/webrtc", methods=["POST", "OPTIONS"])
+def webrtc_proxy():
+    if request.method == "OPTIONS":
+        return _corsify(make_response(("", 204)))
+
+    if not XI_API_KEY:
+        return _corsify(jsonify({"ok": False, "error": "ELEVEN_API_KEY no configurada"})), 500
+
+    token = (request.args.get("token") or "").strip()
+    if not token:
+        return _corsify(jsonify({"ok": False, "error": "Falta token"})), 400
+
+    _trim_issued()
+    rec = _ISSUED.get(token)
+    if not rec:
+        return _corsify(jsonify({"ok": False, "error": "Token inválido o expirado"})), 401
+
+    agent_id = rec.get("agent_id", "")
+    if not agent_id:
+        return _corsify(jsonify({"ok": False, "error": "agent_id no disponible"})), 400
+
+    # Leemos el SDP offer como texto puro
+    offer_sdp = request.get_data(as_text=True) or ""
+    if not offer_sdp.strip():
+        return _corsify(jsonify({"ok": False, "error": "SDP offer vacío"})), 400
+
+    # Reenvío a ElevenLabs (authorization del servidor)
+    try:
+        # ElevenLabs espera el agent_id (query) y el body SDP (text/plain con content-type application/sdp)
+        url = f"{ELEVEN_SDP_ENDPOINT}?agent_id={agent_id}"
+        rr = requests.post(
+            url,
+            data=offer_sdp.encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {XI_API_KEY}",
+                "Content-Type": "application/sdp",
+            },
+            timeout=25,
         )
-        if r.status_code >= 400:
-            return _corsify(jsonify({
-                "ok": False,
-                "error": "Eleven token error",
-                "status": r.status_code,
-                "detail": r.text
-            })), 502
-
-        data = r.json() or {}
-        token = (data.get("token") or "").strip()
-        if not token:
-            return _corsify(jsonify({"ok": False, "error": "Respuesta sin token desde Eleven"})), 502
-
-        return _corsify(jsonify({
-            "ok": True,
-            "token": token,
-            "rtc_url": rtc_url
-        }))
     except requests.Timeout:
-        return _corsify(jsonify({"ok": False, "error": "Timeout solicitando token Eleven"})), 504
+        return _corsify(jsonify({"ok": False, "error": "Timeout al contactar ElevenLabs"})), 504
     except Exception as e:
-        return _corsify(jsonify({"ok": False, "error": "Excepción solicitando token Eleven", "detail": str(e)})), 500
+        return _corsify(jsonify({"ok": False, "error": "Excepción al contactar ElevenLabs", "detail": str(e)})), 502
+
+    # Si ElevenLabs falla, devolvemos info para depurar
+    if rr.status_code >= 400:
+        try_detail = rr.text[:600] if rr.text else ""
+        return _corsify(jsonify({
+            "ok": False,
+            "error": "ElevenLabs error",
+            "status": rr.status_code,
+            "detail": try_detail
+        })), 502
+
+    # Éxito → devolvemos el SDP answer como texto plano (lo espera el RTCPeerConnection)
+    resp = make_response(rr.text, 200)
+    resp.headers["Content-Type"] = "application/sdp"
+    return _corsify(resp)
