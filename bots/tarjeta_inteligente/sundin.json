@@ -37,7 +37,6 @@
 
   "eleven_agent_id": "agent_3101k3a58zgdfgwsr0dhtm3v0z1c",
 
-
   "slug": "sundin",
   "ui": {
     "brand_label": "IN Houston Texas",
@@ -46,7 +45,7 @@
     "profile_focus_y": "20%"
   },
   "vcard": {
-    "first_name": "Sundin",        
+    "first_name": "Sundin",
     "last_name": "Galue",
     "org": "IN Houston Texas",
     "title": "CEO",
@@ -60,6 +59,7 @@
     "app_download": "https://inhoustontexas.us/descargar-app/"
   },
   "endpoints": {
-    "realtime_session": "https://multi-bot-inteligente-v1.onrender.com/realtime/session"
+    "realtime_session": "https://multi-bot-inteligente-v1.onrender.com/realtime/session",
+    "eleven_session": "https://multi-bot-inteligente-v1.onrender.com/eleven/session"
   }
 }
