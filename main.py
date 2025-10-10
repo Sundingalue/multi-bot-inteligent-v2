@@ -29,6 +29,8 @@ import hashlib
 import html
 import uuid
 import requests
+from eleven_realtime import bp as eleven_rt_bp
+
 
 # 🔹 Twilio REST (para enviar mensajes manuales desde el panel)
 from twilio.rest import Client as TwilioClient
@@ -55,6 +57,7 @@ from voice_webrtc_bridge import bp as webrtc_bridge_bp, sock as webrtc_sock
 app.register_blueprint(realtime_bp)
 app.register_blueprint(profiles_bp)
 app.register_blueprint(voice_rt_bp)
+app.register_blueprint(eleven_rt_bp)
 
 from routes.send_link import bp as send_link_bp
 app.register_blueprint(send_link_bp)
