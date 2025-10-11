@@ -1,80 +1,76 @@
 # routes/eleven_webrtc.py
-from flask import Blueprint, request, Response, jsonify
-import os
-import requests
+from flask import Blueprint, request, jsonify, Response, current_app
+import os, requests
 
-bp = Blueprint("eleven_webrtc", __name__)
+bp = Blueprint("eleven_webrtc", __name__, url_prefix="/eleven")
 
-def _auth_ok(req) -> bool:
-    """Valida Bearer si API_BEARER_TOKEN está definido (igual que tu helper)."""
-    api_bearer = (os.environ.get("API_BEARER_TOKEN") or "").strip()
-    if not api_bearer:
-        return True  # sin token -> libre (modo dev)
-    auth = (req.headers.get("Authorization") or "").strip()
-    return auth == f"Bearer {api_bearer}"
+# Preflight CORS para Safari/iOS
+@bp.route("/webrtc", methods=["OPTIONS"])
+def eleven_webrtc_options():
+    resp = Response("", status=200)
+    # Permite origenes que tu app ya valida en main.py (add_cors_headers también actúa)
+    resp.headers["Access-Control-Allow-Origin"] = request.headers.get("Origin", "*")
+    resp.headers["Vary"] = "Origin"
+    resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    # ⬇️ Incluir headers que usa el front
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, xi-api-key, Accept"
+    resp.headers["Access-Control-Max-Age"] = "86400"
+    return resp
 
-@bp.route("/eleven/webrtc", methods=["POST"])
-def eleven_webrtc_sdp():
+@bp.route("/webrtc", methods=["POST"])
+def eleven_webrtc_post():
     """
-    Bridge WebRTC SDP:
-      Front (WordPress) -> (POST SDP) -> ESTE endpoint
-      ESTE endpoint -> (POST SDP) -> ElevenLabs ConvAI
-      Devuelve answer SDP con Content-Type: application/sdp
-
-    Env necesarios:
-      - ELEVENLABS_API_KEY         (obligatorio en prod)
-      - ELEVEN_MODEL               (opcional; default eleven_multilingual_v2)
-      - ELEVEN_VOICE_ID            (opcional; fija la voz por query)
-      - ELEVEN_CONVAI_URL_BASE     (opcional; override del endpoint)
+    Recibe SDP Offer del navegador y lo reenvía a ElevenLabs ConvAI,
+    devolviendo el SDP Answer en texto plano (Content-Type: application/sdp).
     """
-    if not _auth_ok(request):
-        return jsonify({"error": "Unauthorized"}), 401
-
     offer_sdp = request.data or b""
     if not offer_sdp:
-        return jsonify({"error": "Missing SDP offer body"}), 400
+        return jsonify({"error": "Empty SDP offer"}), 400
 
-    eleven_key = (os.environ.get("ELEVENLABS_API_KEY") or "").strip()
-    if not eleven_key:
-        return jsonify({"error": "ELEVENLABS_API_KEY not set"}), 500
+    # === Modelo y voz: vienen por query o .env (fallback) ===
+    model = request.args.get("model") or os.getenv("ELEVEN_DEFAULT_MODEL", "eleven_multilingual_v2")
+    voice_id = request.args.get("voice_id") or os.getenv("ELEVEN_DEFAULT_VOICE_ID", "")
 
-    model = (os.environ.get("ELEVEN_MODEL") or "eleven_multilingual_v2").strip()
-    voice_id = (os.environ.get("ELEVEN_VOICE_ID") or "").strip()
+    # === API Key / Token efímero ===
+    # 1) Token efímero que te devolvió /realtime/session (frontend lo manda en Authorization)
+    bearer = (request.headers.get("Authorization") or "").replace("Bearer ", "").strip()
+    # 2) Fallback a API key fija por si lo quieres probar directo
+    xi_api_key = bearer or (os.getenv("ELEVEN_API_KEY") or "").strip()
+    if not xi_api_key:
+        return jsonify({"error": "Missing ElevenLabs token/API key"}), 401
 
-    # Endpoint típico de ElevenLabs ConvAI (WebRTC/SDP). Dejo override por si cambia.
-    base_url = (os.environ.get("ELEVEN_CONVAI_URL_BASE") or
-                "https://api.elevenlabs.io/v1/convai/conversation").rstrip("/")
-
-    # Construimos URL con query params estándar (modelo y voz si la fijas por servidor)
-    # Ejemplos posibles:
-    #   {base}/webRTC?model=eleven_multilingual_v2&voice_id=<VOICE>
-    #   o {base}/webrtc ... (algunas docs alternan el casing). Probamos “webRTC”.
-    # Puedes ajustar con ELEVEN_CONVAI_URL_BASE si tu cuenta usa otro path.
-    path = "webRTC"
-    url = f"{base_url}/{path}?model={model}"
+    # === URL base de ConvAI (puedes cambiarla por env si Eleven cambia el path) ===
+    base_url = (os.getenv("ELEVEN_CONVAI_URL_BASE") or "https://api.elevenlabs.io/v1/convai/conversation").rstrip("/")
+    # En la práctica, el path suele ser /webrtc o /webRTC; usamos "webrtc"
+    url = f"{base_url}/webrtc?mode={model}"
     if voice_id:
         url += f"&voice_id={voice_id}"
 
-    # Headers compatibles: muchas integraciones aceptan 'xi-api-key' o Bearer.
     headers = {
+        # Lo importante: el upstream espera SDP crudo
         "Content-Type": "application/sdp",
-        "xi-api-key": eleven_key,
-        "Authorization": f"Bearer {eleven_key}",  # por compatibilidad
+        "Accept": "application/sdp",
+        # Enviamos ambos formatos por compatibilidad
+        "Authorization": f"Bearer {xi_api_key}",
+        "xi-api-key": xi_api_key,
     }
 
     try:
         r = requests.post(url, data=offer_sdp, headers=headers, timeout=30)
     except requests.RequestException as e:
-        return jsonify({"error": "Failed to reach ElevenLabs", "detail": str(e)}), 502
+        current_app.logger.error(f"[Eleven] POST failed: {e}")
+        return jsonify({"error": "Failed to reach ElevenLabs"}), 502
 
-    if r.status_code // 100 != 2:
-        # Propagamos info para debug (no devolvemos cuerpo completo por tamaño)
-        return jsonify({
-            "error": "ElevenLabs SDP negotiation failed",
-            "status": r.status_code,
-            "content_type": r.headers.get("Content-Type", ""),
-            "hint": "Revisa ELEVENLABS_API_KEY / modelo / voice_id / URL base"
-        }), 502
+    if r.status_code >= 400:
+        # Loguea para depurar rápido
+        current_app.logger.error(f"[Eleven] HTTP {r.status_code} body={r.text[:400]}")
+        return jsonify({"error": "ElevenLabs upstream error", "status": r.status_code}), 502
 
-    # Devolvemos el SDP ANSWER “as is”
-    return Response(r.text, status=200, mimetype="application/sdp")
+    # Debe devolver SDP puro (text/plain o application/sdp); forzamos application/sdp
+    resp = Response(r.text, status=200, mimetype="application/sdp")
+    # CORS espejo (el after_request global también agrega)
+    origin = request.headers.get("Origin", "")
+    if origin:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Vary"] = "Origin"
+    return resp
