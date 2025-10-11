@@ -1,12 +1,10 @@
 # helpers.py — utilidades puras (sin Flask), listas para importar desde main.py
-# Objetivo: concentrar helpers de texto, intents, urls, tiempo, hash y teléfonos.
-
 from __future__ import annotations
 import re
 import time
 import hashlib
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import List
 
 # ───────── URL helpers ─────────
 def valid_url(u: str) -> bool:
@@ -114,22 +112,30 @@ def wants_app_download(text: str) -> bool:
     return ("descargar app" in t) or ("download app" in t) or (has_app_word and has_download_intent)
 
 def is_affirmative(texto: str) -> bool:
-    if not texto: return False
+    if not texto:
+        return False
     t = texto.strip().lower()
     afirm = {"si","sí","ok","okay","dale","va","claro","por favor","hagamoslo","hagámoslo","perfecto","de una","yes","yep","yeah","sure","please"}
     return any(t == a or t.startswith(a + " ") for a in afirm)
 
 def is_negative(texto: str) -> bool:
-    if not texto: return False
+    if not texto:
+        return False
     t = re.sub(r'[.,;:!?]+$', '', texto.strip().lower())
     t = re.sub(r'\s+', ' ', t)
     negatives = {"no", "nop", "no gracias", "ahora no", "luego", "después", "despues", "not now"}
     return t in negatives
 
 def is_scheduled_confirmation(texto: str) -> bool:
-    if not texto: return False
+    if not texto:
+        return False
     t = texto.lower()
     kws = ["ya agende","ya agendé","agende","agendé","ya programe","ya programé","ya agendado","agendado","confirmé","confirmado","listo","done","booked","i booked","i scheduled","scheduled"]
     return any(k in t for k in kws)
 
-de
+def is_polite_closure(texto: str) -> bool:
+    if not texto:
+        return False
+    t = texto.strip().lower()
+    cierres = {"gracias","muchas gracias","ok gracias","listo gracias","perfecto gracias","estamos en contacto","por ahora está bien","por ahora esta bien","luego te escribo","luego hablamos","hasta luego","buen día","buen dia","buenas noches","nos vemos","chao","bye","eso es todo","todo bien gracias"}
+    return any(t == c or t.startswith(c + " ") for c in cierres)
