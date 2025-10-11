@@ -8,6 +8,7 @@ eventlet.monkey_patch(os=False)   # <— en vez de eventlet.monkey_patch()
 import os, sys
 sys.path.append(os.path.dirname(__file__))
 
+
 # Resto de importaciones
 from flask import Flask, request, session, redirect, url_for, send_file, send_from_directory, jsonify, render_template, make_response, Response
 import pathlib
@@ -15,6 +16,7 @@ from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import VoiceResponse, Gather, Connect
 from openai import OpenAI
 from dotenv import load_dotenv
+import os
 import json
 import time
 from datetime import datetime, timedelta
@@ -27,20 +29,9 @@ import hashlib
 import html
 import uuid
 import requests
+from eleven_realtime import bp as eleven_rt_bp
+from routes.eleven_session import bp as eleven_bp
 
-# === Blueprints opcionales (no rompemos si alguno falta) ===
-def _safe_import_bp(module_path, attr_name="bp"):
-    try:
-        mod = __import__(module_path, fromlist=[attr_name])
-        return getattr(mod, attr_name, None)
-    except Exception as e:
-        print(f"⚠️ No se pudo cargar {module_path}: {e}")
-        return None
-
-# ElevenLabs session (token efímero + rtc_url)
-eleven_bp = _safe_import_bp("routes.eleven_session", "bp")
-# (Si usas un bridge propio de Eleven distinto, se puede cargar similar)
-eleven_rt_bp = _safe_import_bp("eleven_realtime", "bp")
 
 # 🔹 Twilio REST (para enviar mensajes manuales desde el panel)
 from twilio.rest import Client as TwilioClient
@@ -54,36 +45,31 @@ from firebase_admin import messaging as fcm
 # ✅ Crear la app ANTES de registrar los blueprints (y solo una vez)
 app = Flask(__name__)
 
-# 🔹 Otros blueprints (opcionales)
-realtime_bp      = _safe_import_bp("avatar_realtime", "bp")
-profiles_bp      = _safe_import_bp("avatar_profiles", "bp")
-voice_rt_bp      = _safe_import_bp("voice_realtime", "bp")
+# 🔹 Avatar Realtime (sesión efímera para “Hablar ahora”)
+from avatar_realtime import bp as realtime_bp
+from avatar_profiles import bp as profiles_bp
+from voice_realtime import bp as voice_rt_bp
 
 # 🔹 Bridge WebRTC ↔ OpenAI Realtime (Twilio Media Streams)
-webrtc_bridge_bp = None
-webrtc_sock      = None
-try:
-    _wb = __import__("voice_webrtc_bridge", fromlist=["bp", "sock"])
-    webrtc_bridge_bp = getattr(_wb, "bp", None)
-    webrtc_sock      = getattr(_wb, "sock", None)
-except Exception as e:
-    print(f"⚠️ voice_webrtc_bridge no disponible: {e}")
+#    Importamos también el `sock` y lo inicializamos más abajo.
+from voice_webrtc_bridge import bp as webrtc_bridge_bp, sock as webrtc_sock
 
-# ⬇️ Montar blueprints disponibles y arrancar Flask-Sock
-for _bp in (realtime_bp, profiles_bp, voice_rt_bp, eleven_rt_bp, eleven_bp):
-    if _bp:
-        try:
-            app.register_blueprint(_bp)
-        except Exception as e:
-            print(f"⚠️ No se pudo registrar blueprint {_bp}: {e}")
+# ⬇️ Montar blueprints y arrancar Flask-Sock
+app.register_blueprint(realtime_bp)
+app.register_blueprint(profiles_bp)
+app.register_blueprint(voice_rt_bp)
+app.register_blueprint(eleven_rt_bp)
+app.register_blueprint(eleven_bp)
 
-if webrtc_bridge_bp:
-    app.register_blueprint(webrtc_bridge_bp)
-    if webrtc_sock:
-        try:
-            webrtc_sock.init_app(app)  # Inicializa WebSocket /voice-webrtc/stream
-        except Exception as e:
-            print(f"⚠️ No se pudo iniciar WebSocket del bridge: {e}")
+from routes.send_link import bp as send_link_bp
+app.register_blueprint(send_link_bp)
+
+
+app.register_blueprint(webrtc_bridge_bp)  # Rutas /voice-webrtc/*
+# ⚠️ Evita AttributeError si sock no está disponible
+if webrtc_sock:
+    webrtc_sock.init_app(app)              # Inicializa WebSocket /voice-webrtc/stream
+
 
 # =======================
 #  Cargar variables de entorno (Render -> Secret File)
@@ -104,25 +90,6 @@ APP_DOWNLOAD_URL_FALLBACK = (os.environ.get("APP_DOWNLOAD_URL", "").strip())
 # 🔐 NEW (opcional): Bearer para proteger endpoints /push/* y (ahora) API móvil
 API_BEARER_TOKEN = (os.environ.get("API_BEARER_TOKEN") or "").strip()
 
-# === CORS: Permitir WordPress + modo abierto por env ===
-PUBLIC_CORS = (os.getenv("PUBLIC_CORS", "0").strip() in ("1", "true", "TRUE", "yes", "YES"))
-ALLOWED_ORIGINS = {
-    "https://inhoustontexas.us",
-    "https://www.inhoustontexas.us"
-}
-def _origin_allowed(origin: str) -> bool:
-    if PUBLIC_CORS:
-        return True
-    if not origin:
-        return False
-    # Permite dominio raíz y subdominios *.inhoustontexas.us
-    if origin in ALLOWED_ORIGINS:
-        return True
-    try:
-        return origin.endswith(".inhoustontexas.us")
-    except Exception:
-        return False
-
 def _valid_url(u: str) -> bool:
     return isinstance(u, str) and (u.startswith("http://") or u.startswith("https://"))
 
@@ -136,7 +103,6 @@ app.secret_key = "supersecreto_sundin_panel_2025"
 
 # === JSON de Tarjeta Inteligente (sirve archivos desde bots/tarjeta_inteligente) ===
 JSON_DIR = os.path.join(os.path.dirname(__file__), "bots", "tarjeta_inteligente")
-os.makedirs(JSON_DIR, exist_ok=True)
 
 # 1) Sirve los JSON crudos (ej: /clients/sundin.json)
 @app.route("/clients/<path:filename>", methods=["GET"])
@@ -159,6 +125,7 @@ def api_avatar(slug):
     )
     return jsonify(data)
 
+
 # ✅ Sesión persistente (remember me)
 app.permanent_session_lifetime = timedelta(days=60)
 app.config.update({
@@ -167,23 +134,24 @@ app.config.update({
 })
 
 # 🌐 NEW: CORS básico para llamadas desde WordPress / app
+# Dominios permitidos para front
+ALLOWED_ORIGINS = {
+    "https://inhoustontexas.us",
+    "https://www.inhoustontexas.us"
+}
+
 @app.after_request
 def add_cors_headers(resp):
     origin = request.headers.get("Origin", "")
-    if _origin_allowed(origin):
+    if origin in ALLOWED_ORIGINS:
         resp.headers["Access-Control-Allow-Origin"] = origin
         resp.headers["Vary"] = "Origin"
-    # Encabezados y métodos que vamos a permitir (incluye Authorization + application/sdp)
+    # Encabezados y métodos que vamos a permitir
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     resp.headers["Access-Control-Max-Age"] = "86400"
     return resp
 
-# ✅ Respuesta universal para PRE-Flight (OPTIONS)
-@app.route("/", defaults={"_u": ""}, methods=["OPTIONS"])
-@app.route("/<path:_u>", methods=["OPTIONS"])
-def any_options(_u):
-    return ("", 204)
 
 def _bearer_ok(req) -> bool:
     """Devuelve True si no hay token configurado o si el header Authorization coincide."""
@@ -255,47 +223,25 @@ if not bots_config:
 # =======================
 #  💡 Registrar la API de facturación (Blueprint)
 # =======================
-def _safe_register(bp, prefix=None):
-    if not bp:
-        return
-    try:
-        if prefix:
-            app.register_blueprint(bp, url_prefix=prefix)
-        else:
-            app.register_blueprint(bp)
-    except Exception as e:
-        print(f"⚠️ No se pudo registrar blueprint {bp}: {e}")
+from bots.api_mobile import mobile_bp
+from instagram_webhook import ig_bp
+from instagram_api_multi import ig_multi_bp   # 👈 Import nuevo aquí
+from billing_api import billing_bp
 
+# Fallback suave por si record_openai_usage no está expuesto en billing_api
 try:
-    from bots.api_mobile import mobile_bp
-    _safe_register(mobile_bp, "/api/mobile")
-except Exception as e:
-    print(f"⚠️ api_mobile no disponible: {e}")
-
-try:
-    from instagram_webhook import ig_bp
-    _safe_register(ig_bp)
-except Exception as e:
-    print(f"⚠️ instagram_webhook no disponible: {e}")
-
-try:
-    from instagram_api_multi import ig_multi_bp
-    _safe_register(ig_multi_bp, "/api/instagram_bot")
-except Exception as e:
-    print(f"⚠️ instagram_api_multi no disponible: {e}")
-
-try:
-    from billing_api import billing_bp, record_openai_usage  # type: ignore
-    _safe_register(billing_bp, "/billing")
-except Exception as e:
-    print(f"⚠️ billing_api no disponible: {e}")
+    from billing_api import record_openai_usage  # type: ignore
+except Exception:
     def record_openai_usage(*args, **kwargs):
         return None
 
-# --- Exponer recursos al Blueprint de Instagram ---
-app.config["BOTS_CONFIG"] = bots_config
-app.config["OPENAI_CLIENT"] = client
-app.config["FB_APPEND_HISTORIAL"] = lambda *a, **kw: None  # asignaremos después
+app.register_blueprint(mobile_bp, url_prefix="/api/mobile")
+app.register_blueprint(ig_bp)  # expone /webhook_instagram (GET verificación, POST eventos)
+app.register_blueprint(ig_multi_bp, url_prefix="/api/instagram_bot")  # 👈 Registro aquí
+app.register_blueprint(billing_bp, url_prefix="/billing")
+
+
+
 
 # =======================
 #  Memorias por sesión (runtime)
@@ -309,6 +255,7 @@ greeted_state = {}           # clave_sesion -> bool (si ya se saludó)
 # ✅ CORRECCIÓN: Definición de variables globales para la voz
 voice_call_cache = {}
 voice_conversation_history = {}
+
 
 # =======================
 #  Helpers generales (neutros)
@@ -358,11 +305,15 @@ def _get_bot_cfg_by_any_number(to_number: str):
     if not to_number:
         if len(bots_config) == 1:
             return list(bots_config.values())[0]
+    
+    # ✅ CORRECCIÓN FINAL: Buscar por E.164 para mayor compatibilidad
     canon_to = _canonize_phone(to_number)
     for key, cfg in bots_config.items():
         if _canonize_phone(key) == canon_to:
             return cfg
+    
     return bots_config.get(to_number)
+
 
 def _get_bot_number_by_name(bot_name: str) -> str:
     """Devuelve la clave 'whatsapp:+1...' de bots_config para un nombre de bot dado."""
@@ -543,18 +494,17 @@ def fb_append_historial(bot_nombre, numero, entrada):
     lead.setdefault("notes", "")
     ref.set(lead)
 
-# expón en config para otros módulos
-app.config["FB_APPEND_HISTORIAL"] = fb_append_historial
-
 def fb_list_leads_all():
     root = db.reference("leads").get() or {}
     leads = {}
     if not isinstance(root, dict):
         return leads
+    # ✅ (ARREGLO) iterar correctamente por bot -> numeros
     for bot_nombre, numeros in root.items():
         if not isinstance(numeros, dict):
             continue
         for numero, data in numeros.items():
+            # 🧽 Excluir leads de Instagram
             if str(numero).startswith("ig:"):
                 continue
             clave = f"{bot_nombre}|{numero}"
@@ -576,20 +526,22 @@ def fb_list_leads_by_bot(bot_nombre):
     if not isinstance(numeros, dict):
         return leads
     for numero, data in numeros.items():
+        # 🧽 Excluir leads de Instagram
         if str(numero).startswith("ig:"):
             continue
         clave = f"{bot_nombre}|{numero}"
         leads[clave] = {
-                "bot": bot_nombre,
-                "numero": numero,
-                "first_seen": data.get("first_seen", ""),
-                "last_message": data.get("last_message", ""),
-                "last_seen": data.get("last_seen", ""),
-                "messages": int(data.get("messages", 0)),
-                "status": data.get("status", "nuevo"),
-                "notes": data.get("notes", "")
-            }
+            "bot": bot_nombre,
+            "numero": numero,
+            "first_seen": data.get("first_seen", ""),
+            "last_message": data.get("last_message", ""),
+            "last_seen": data.get("last_seen", ""),
+            "messages": int(data.get("messages", 0)),
+            "status": data.get("status", "nuevo"),
+            "notes": data.get("notes", "")
+        }
     return leads
+
 
 # ✅ NUEVO: eliminar lead completo
 def fb_delete_lead(bot_nombre, numero):
@@ -599,6 +551,12 @@ def fb_delete_lead(bot_nombre, numero):
     except Exception as e:
         print(f"❌ Error eliminando lead {bot_nombre}/{numero}: {e}")
         return False
+    
+    # --- Exponer recursos al Blueprint de Instagram ---
+app.config["BOTS_CONFIG"] = bots_config
+app.config["OPENAI_CLIENT"] = client
+app.config["FB_APPEND_HISTORIAL"] = fb_append_historial
+
 
 # ✅ NUEVO: vaciar solo el historial (mantener lead)
 def fb_clear_historial(bot_nombre, numero):
@@ -967,6 +925,7 @@ def ig_auth_redirect():
     if not code:
         return "❌ Falta parámetro 'code' en la redirección.", 400
     return f"✅ Login Instagram exitoso. Code recibido: {code}"
+
 # =======================
 #  ✅ API: Intercambio de código OAuth Instagram (multiusuario)
 # =======================
@@ -985,7 +944,7 @@ def api_instagram_exchange_code():
 
     try:
         resp = requests.post(
-            "https://graph.facebook.com/v21.0/oauth_access_token",
+            "https://graph.facebook.com/v21.0/oauth/access_token",
             data={
                 "client_id": os.getenv("IG_CLIENT_ID"),
                 "client_secret": os.getenv("IG_CLIENT_SECRET"),
@@ -1253,6 +1212,7 @@ def api_instagram_bot_status(user_id):
         print(f"❌ Error leyendo estado IG bot {user_id}: {e}")
         return jsonify({"enabled": True, "error": str(e)})
 
+
 # =======================
 #  🔔 NEW: Endpoints PUSH (evitan HTTP 404)
 # =======================
@@ -1418,10 +1378,11 @@ def push_universal():
     except Exception as e:
         print(f"❌ Error FCM universal: {e}")
         return jsonify({"success": False, "message": "FCM error"}), 500
-
+    
 # =======================
 #  ✅ API Instagram Bot (multiusuario)
 # =======================
+
 
 def api_instagram_bot_status(user_id):
     """
@@ -1698,6 +1659,7 @@ def voice_webhook():
     resp.append(connect)
     return str(resp)
 
+
 # =======================
 #  Vistas de conversación (leen Firebase)
 # =======================
@@ -1759,7 +1721,7 @@ def api_chat(bot, numero):
     if not bot_normalizado:
         return jsonify({"error": "Bot no encontrado"}), 404
     if session.get("autenticado") and not _user_can_access_bot(bot_normalizado):
-        return jsonify({"error": "No autorizado para este bot"}), 403
+        return jsonify({"error": "No autorizado"}), 403
 
     since_param = request.args.get("since", "").strip()
     try:
@@ -1792,6 +1754,7 @@ def api_chat(bot, numero):
     bot_enabled = fb_is_conversation_on(bot_normalizado, numero)
 
     return jsonify({"mensajes": nuevos, "last_ts": last_ts, "bot_enabled": bool(bot_enabled)})
+
 # =======================
 #  Run
 # =======================
