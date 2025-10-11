@@ -1,0 +1,12 @@
+.
+bots
+bots/tarjeta_inteligente
+credentials
+routes
+static
+static/img
+templates
+utils
+web
+web/public
+web/public/web
