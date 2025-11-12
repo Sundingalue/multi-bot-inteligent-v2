@@ -1,34 +1,28 @@
 # routes/eleven_session.py
-from flask import Blueprint, jsonify, request, current_app
-import os
+from flask import Blueprint, request, jsonify
+import os, time
 
-bp = Blueprint("eleven_session", __name__)
+bp = Blueprint("eleven_session", __name__, url_prefix="/realtime")
 
-@bp.route("/realtime/session", methods=["POST"])
-def realtime_session():
+@bp.route("/session", methods=["POST"])
+def eleven_session():
     """
-    Devuelve un “token efímero” para que el front agregue:
-      Authorization: Bearer <token>
-    En nuestro caso usamos API_BEARER_TOKEN (ya presente en main.py)
-    para proteger /eleven/webrtc. Mantengo compat con tu plugin:
-      - session.client_secret.value
-      - jwt (top-level)
-      - session.model (no bloquea nada)
+    Devuelve un portador utilizable por el front:
+    - jwt / token: el que Eleven acepta como Bearer o xi-api-key (aquí usamos ELEVEN_API_KEY fija).
+    - model: para que el front lo conozca si quieres.
     """
-    api_bearer = os.environ.get("API_BEARER_TOKEN", "").strip()
-    # Si no hay token configurado, igual devolvemos algo (modo dev)
-    if not api_bearer:
-        api_bearer = "dev-token-unsafe"
+    # En producción genera un JWT efímero; para simplificar usamos la API key fija:
+    token = (os.getenv("ELEVEN_API_KEY") or "").strip()
+    if not token:
+        return jsonify({"ok": False, "error": "ELEVEN_API_KEY missing"}), 500
 
-    # Puedes fijarlo en JSON/bot si quieres, pero aquí damos un default
-    model = request.args.get("model") or "eleven_multilingual_v2"
-
+    model = os.getenv("ELEVEN_DEFAULT_MODEL", "eleven_multilingual_v2")
     return jsonify({
         "ok": True,
         "session": {
-            "client_secret": { "value": api_bearer },  # compat OpenAI
+            "jwt": token,
             "model": model,
-            # Opcional: puedes incluir otros hints si quieres
-        },
-        "jwt": api_bearer  # compat por si el front lee jwt directo
+            "issued_at": int(time.time()),
+            "expires_in": 3600
+        }
     })
